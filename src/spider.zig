@@ -2,38 +2,38 @@ const std = @import("std");
 const builtin = @import("builtin");
 const bitops = @import("bitops.zig");
 
-const Spider = struct {
-    pub const Error = error{ OutOfBounds, Undefined };
+pub const Spider = struct {
+    pub const Error = error{ OutOfBounds, Undefined, NotFound };
 
     const sb_size = 63488;
     const Self = @This();
 
+    const SelectData = struct {
+        hl_select: []const u64,
+        ll_select: []const u16,
+        sigma_hl_pow: u6,
+        sigma_ll_pow: u4,
+    };
+
     bit_array: []align(64) const u8,
-
     hl_rank: []const u64,
-    hl_select: []const u64,
-    ll_select: []const u16,
-
-    sigma_hl_pow: u6,
-    sigma_ll_pow: u4,
-
     size: u64,
+    sd1: SelectData,
+    sd0: SelectData,
 
     pub fn init(allocator: std.mem.Allocator, bits: []const u8, num_bits: u64) !Self {
         if (num_bits == 0) return Error.Undefined;
         if ((num_bits - 1) >> 3 + 1 > bits.len) return Error.OutOfBounds;
 
         const rnk = try build_rank(allocator, bits, num_bits);
-        const sel = try build_select(allocator, rnk.count, num_bits, rnk.bit_array);
+        const sel1 = try build_select(allocator, rnk.count, num_bits, rnk.bit_array, false);
+        const sel0 = try build_select(allocator, rnk.count, num_bits, rnk.bit_array, true);
 
         return Spider{
             .hl_rank = rnk.hl_rank,
             .bit_array = rnk.bit_array,
-            .hl_select = sel.hl_select,
-            .ll_select = sel.ll_select,
-            .sigma_hl_pow = sel.sigma_hl_pow,
-            .sigma_ll_pow = sel.sigma_ll_pow,
-
+            .sd1 = sel1,
+            .sd0 = sel0,
             .size = num_bits,
         };
     }
@@ -110,9 +110,8 @@ const Spider = struct {
         var cumulative_count: u64 = 0;
         var relative_count: u16 = 0;
         var k: usize = 0;
-        while ((k << 3) < num_bits) {
+        while ((k << 3) < num_bits) : (k += 1) {
             rank_byte(bits[k], k, &cumulative_count, &relative_count, &hl_rank, &bit_array);
-            k += 1;
         }
 
         rank_last_byte(@intCast(num_bits & 0b111), &cumulative_count, &hl_rank, &bit_array);
@@ -129,25 +128,29 @@ const Spider = struct {
         cumulative_count: u64,
         num_bits: u64,
         bit_array: []align(64) u8,
-    ) !struct { hl_select: []u64, ll_select: []u16, sigma_hl_pow: u6, sigma_ll_pow: u4 } {
+        comptime flip: bool,
+    ) !SelectData {
         var hl_select = std.ArrayListUnmanaged(u64){};
         defer hl_select.deinit(allocator);
         var ll_select = std.ArrayListUnmanaged(u16){};
         defer ll_select.deinit(allocator);
 
-        const s_hl_pow: u6 = @intFromFloat(@ceil(@log2(@as(f64, @floatFromInt(sb_size * cumulative_count)) / @as(f64, @floatFromInt(num_bits)))));
-        const s_ll_pow: u4 = @intFromFloat(@ceil(@log2(4096.0 * 0.99 * @as(f64, @floatFromInt(cumulative_count)) / @as(f64, @floatFromInt(num_bits)))));
+        const c_count = if (flip) num_bits - cumulative_count else cumulative_count;
 
-        try hl_select.ensureTotalCapacityPrecise(allocator, 2 + (cumulative_count >> s_hl_pow));
-        try ll_select.ensureTotalCapacityPrecise(allocator, 2 + (cumulative_count >> s_ll_pow));
+        const s_hl_pow: u6 = @intFromFloat(@ceil(@log2(@as(f64, @floatFromInt(sb_size * c_count)) / @as(f64, @floatFromInt(num_bits)))));
+        const s_ll_pow: u4 = @intFromFloat(@ceil(@log2(4096.0 * 0.99 * @as(f64, @floatFromInt(c_count)) / @as(f64, @floatFromInt(num_bits)))));
+
+        try hl_select.ensureTotalCapacityPrecise(allocator, 2 + (c_count >> s_hl_pow));
+        try ll_select.ensureTotalCapacityPrecise(allocator, 2 + (c_count >> s_ll_pow));
 
         var pos: u64 = 0;
         var k: u64 = 0;
 
         for (0..bit_array.len) |m| {
             if (m % 64 == 0 or (m - 1) % 64 == 0) continue;
-            if (bit_array[m] == 0) continue;
-            pos = ((m - ((m >> 6) + 1) * 2) << 3) + @clz(bit_array[m]);
+            const it = if (flip) ~bit_array[m] else bit_array[m];
+            if (it == 0) continue;
+            pos = ((m - ((m >> 6) + 1) * 2) << 3) + @clz(it);
             k = m;
             break;
         }
@@ -163,7 +166,7 @@ const Spider = struct {
             if (m % 64 == 0 or (m - 1) % 64 == 0) continue;
             pos = (m - ((m >> 6) + 1) * 2) << 3;
 
-            const byte = bit_array[m];
+            const byte = if (flip) ~bit_array[m] else bit_array[m];
             const count = @popCount(byte);
 
             if (hl_count + count < (@as(u64, 1) << s_hl_pow)) {
@@ -172,7 +175,7 @@ const Spider = struct {
                 const ones_left = (@as(u64, 1) << s_hl_pow) - hl_count;
                 const r_pos = try bitops.nthSetBitPos(byte, @intCast(ones_left));
                 hl_select.appendAssumeCapacity(((pos + r_pos) + (sb_size >> 1)) / sb_size);
-                hl_count = count - @popCount(@as(u16, bit_array[m]) >> @intCast(ones_left));
+                hl_count = count - @popCount(@as(u16, byte) >> @intCast(ones_left));
             }
 
             if (ll_count + count < (@as(u16, 1) << s_ll_pow)) {
@@ -181,7 +184,7 @@ const Spider = struct {
                 const ones_left = (@as(u16, 1) << s_ll_pow) - ll_count;
                 const r_pos = try bitops.nthSetBitPos(byte, @intCast(ones_left));
                 ll_select.appendAssumeCapacity(@intCast((pos + r_pos) - ((pos >> s_ll_pow) << s_ll_pow)));
-                ll_count = count - @popCount(@as(u16, bit_array[m]) >> @intCast(ones_left));
+                ll_count = count - @popCount(@as(u16, byte) >> @intCast(ones_left));
             }
 
             if (count > 0) {
@@ -192,7 +195,7 @@ const Spider = struct {
         hl_select.appendAssumeCapacity(hl_select.capacity - 1);
         ll_select.appendAssumeCapacity(@intCast(sel_n1 - sb_size * (sel_n1 / sb_size)));
 
-        return .{
+        return SelectData{
             .hl_select = try hl_select.toOwnedSlice(allocator),
             .ll_select = try ll_select.toOwnedSlice(allocator),
             .sigma_hl_pow = s_hl_pow,
@@ -202,8 +205,10 @@ const Spider = struct {
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         allocator.free(self.hl_rank);
-        allocator.free(self.hl_select);
-        allocator.free(self.ll_select);
+        allocator.free(self.sd1.hl_select);
+        allocator.free(self.sd0.hl_select);
+        allocator.free(self.sd1.ll_select);
+        allocator.free(self.sd0.ll_select);
         allocator.free(self.bit_array);
         self.* = undefined;
     }
@@ -236,50 +241,61 @@ const Spider = struct {
             count += @popCount(self.bit_array[(x << 6) + 2 + (n_bits >> 3)] >> @intCast(8 - remaining));
         }
 
-        return self.hl_rank[ri] + self.r_count(x) + count;
+        return self.hl_rank[ri] + self.r_count1(x) + count;
     }
 
-    pub fn selectB1(self: *Self, i: u64) Error!u64 {
-        if (i == 0) return Error.Undefined;
-        if (i > self.hl_rank[self.hl_rank.len - 1]) return Error.OutOfBounds;
+    pub fn select0(self: *Self, i: u64) Error!u64 {
+        return self.select_general(i, &self.sd0, true);
+    }
 
-        var s = (i - 1) >> self.sigma_hl_pow;
+    pub fn select1(self: *Self, i: u64) Error!u64 {
+        return self.select_general(i, &self.sd1, false);
+    }
+
+    fn select_general(self: *Self, i: u64, s_data: *SelectData, comptime flip: bool) Error!u64 {
+        const count = if (flip) Spider.count0 else Spider.count1;
+        const r_count = if (flip) Spider.r_count0 else Spider.r_count1;
+
+        if (i == 0) return Error.Undefined;
+        if (i > count(self, self.hl_rank.len - 1)) return Error.OutOfBounds;
+
+        var s = (i - 1) >> s_data.sigma_hl_pow;
         // while (i <= self.hl_rank[s] or i > self.hl_rank[s + 1]) {
         //     if (i <= self.hl_rank[s]) s += 1 else s -|= 1;
         // }
 
-        while (i <= self.hl_rank[s]) s -|= 1;
-        while (i > self.hl_rank[s + 1]) s +|= 1;
+        while (i <= count(self, s)) s -|= 1;
+        while (i > count(self, s + 1)) s +|= 1;
 
-        const l = (i - 1) >> self.sigma_ll_pow;
-        var a: u64 = @intCast(self.ll_select[l]);
-        var b: u64 = @intCast(self.ll_select[l + 1]);
+        const l = (i - 1) >> s_data.sigma_ll_pow;
+        var a: u64 = @intCast(s_data.ll_select[l]);
+        var b: u64 = @intCast(s_data.ll_select[l + 1]);
 
         if (b < a) {
-            if (self.hl_rank[s] >= (l << self.sigma_ll_pow)) {
+            if (count(self, s) >= (l << s_data.sigma_ll_pow)) {
                 a -|= sb_size;
             } else {
                 b +|= sb_size;
             }
         }
 
-        var p = @as(u64, s << 10) + (a + ((i - (l << self.sigma_ll_pow)) * (b - a) >> self.sigma_ll_pow)) / 62;
+        var p = @as(u64, s << 10) + (a + ((i - (l << s_data.sigma_ll_pow)) * (b - a) >> s_data.sigma_ll_pow)) / 62;
         // var p: u64 = (sb_size * s + a + (((i - (l << self.sigmaLlPow)) * (b - a)) >> self.sigmaLlPow)) / 496;
 
-        while ((p << 6 >= self.bit_array.len) or i <= self.r_count(p) + self.hl_rank[p >> 7]) p -|= 1;
-        while (((p + 1) << 6 < self.bit_array.len) and i > self.r_count(p + 1) + self.hl_rank[(p + 1) >> 7]) p +|= 1;
+        while ((p << 6 >= self.bit_array.len) or i <= r_count(self, p) + count(self, p >> 7)) p -|= 1;
+        while (((p + 1) << 6 < self.bit_array.len) and i > r_count(self, p + 1) + count(self, (p + 1) >> 7)) p +|= 1;
 
-        const target = i - (self.r_count(p) + self.hl_rank[p >> 7]);
+        const target = i - (r_count(self, p) + count(self, p >> 7));
 
         var rel_count: usize = 0;
         for (((p << 6) + 2)..self.bit_array.len) |m| {
             if (m % 64 == 0 or (m - 1) % 64 == 0) continue;
 
-            const byte = self.bit_array[m];
-            const count = @popCount(byte);
+            const byte = if (flip) ~self.bit_array[m] else self.bit_array[m];
+            const b_count = @popCount(byte);
 
-            if (rel_count + count < target) {
-                rel_count += count;
+            if (rel_count + b_count < target) {
+                rel_count += b_count;
             } else {
                 const r_pos = bitops.nthSetBitPos(byte, @intCast(target - rel_count)) catch 0;
                 return ((m - ((m >> 6) + 1) * 2) << 3) + r_pos;
@@ -289,11 +305,25 @@ const Spider = struct {
         return Error.Undefined;
     }
 
-    fn r_count(self: *Self, i: usize) u16 {
+    fn count0(self: *Self, i: usize) u64 {
+        return (i * sb_size) - self.hl_rank[i];
+    }
+
+    fn count1(self: *Self, i: usize) u64 {
+        return self.hl_rank[i];
+    }
+
+    fn r_count0(self: *Self, i: usize) u16 {
+        const c1 = std.mem.readInt(u16, self.bit_array[(i << 6)..][0..2], builtin.cpu.arch.endian());
+        const start: u16 = @intCast(i * (sb_size >> 7) % sb_size);
+        return start - c1;
+    }
+
+    fn r_count1(self: *Self, i: usize) u16 {
         return std.mem.readInt(u16, self.bit_array[(i << 6)..][0..2], builtin.cpu.arch.endian());
     }
 
-    const Builder = struct {
+    pub const Builder = struct {
         pub const Error = error{InvalidN};
         const bufferSize = 128;
         const Self = @This();
@@ -320,8 +350,6 @@ const Spider = struct {
             };
         }
 
-        fn init() !Builder.Self {}
-
         pub fn deinit(self: *Builder.Self, allocator: std.mem.Allocator) void {
             self.hl_rank.deinit(allocator);
             self.bit_array.deinit(allocator);
@@ -341,7 +369,7 @@ const Spider = struct {
             while (remaining > 0) {
                 const buffer_pos = self.bits_written & 0b111;
                 const to_write = @min(@as(u4, 8) - buffer_pos, remaining);
-                const mask = (@as(u16, 1) << @intCast(to_write)) - 1;
+                const mask = @as(u8, 0xFF) >> @intCast(8 - to_write);
                 self.buffer |= @truncate((data >> @intCast(remaining - to_write)) & mask);
 
                 if (buffer_pos + to_write >= 8) {
@@ -359,16 +387,14 @@ const Spider = struct {
 
             const bit_arr = try self.bit_array.toOwnedSlice(allocator);
 
-            const sel = try build_select(allocator, self.cumulative_count, self.num_bits, bit_arr);
+            const sel1 = try build_select(allocator, self.cumulative_count, self.num_bits, bit_arr, false);
+            const sel0 = try build_select(allocator, self.cumulative_count, self.num_bits, bit_arr, true);
 
             return Spider{
                 .hl_rank = try self.hl_rank.toOwnedSlice(allocator),
                 .bit_array = bit_arr,
-                .hl_select = sel.hl_select,
-                .ll_select = sel.ll_select,
-                .sigma_hl_pow = sel.sigma_hl_pow,
-                .sigma_ll_pow = sel.sigma_ll_pow,
-
+                .sd1 = sel1,
+                .sd0 = sel0,
                 .size = self.num_bits,
             };
         }
@@ -442,7 +468,7 @@ test "spiderRank" {
     try std.testing.expectError(Spider.Error.Undefined, spider.rankB1(0));
 }
 
-test "spiderSelect" {
+test "spiderSelect1" {
     const seed = 0x4C27A681B1;
     const buf_size = 1 << 10;
 
@@ -466,12 +492,47 @@ test "spiderSelect" {
         const pos = try bitops.nthSetBitPos(data[i], n);
         const expectation = i * 8 + pos;
 
-        const select = try spider.selectB1(count + n);
+        const select = try spider.select1(count + n);
         try std.testing.expectEqual(expectation, select);
 
         count += @popCount(data[i]);
     }
 
-    try std.testing.expectError(Spider.Error.Undefined, spider.selectB1(0));
-    try std.testing.expectEqual(2, spider.selectB1(1));
+    try std.testing.expectError(Spider.Error.Undefined, spider.select1(0));
+    try std.testing.expectEqual(2, spider.select1(1));
+}
+
+test "spiderSelect0" {
+    const seed = 0x3D93F7A0B1;
+    const buf_size = 1 << 10;
+
+    var r = std.Random.DefaultPrng.init(seed);
+    var random = r.random();
+
+    var data = try std.testing.allocator.alloc(u8, buf_size);
+    defer std.testing.allocator.free(data);
+
+    data.len = buf_size;
+    random.bytes(data);
+
+    var spider = try Spider.init(std.testing.allocator, data, buf_size * 8);
+    defer spider.deinit(std.testing.allocator);
+
+    var count: u64 = 0;
+
+    for (0..buf_size) |i| {
+        const byte = ~data[i];
+        if (byte == 0) continue;
+        const n = random.uintAtMost(u4, @popCount(byte) - 1) + 1;
+        const pos = try bitops.nthSetBitPos(byte, n);
+        const expectation = i * 8 + pos;
+
+        const select = try spider.select0(count + n);
+        try std.testing.expectEqual(expectation, select);
+
+        count += @popCount(byte);
+    }
+
+    try std.testing.expectError(Spider.Error.Undefined, spider.select1(0));
+    try std.testing.expectEqual(2, spider.select1(1));
 }
