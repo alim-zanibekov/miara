@@ -3,9 +3,9 @@ const builtin = @import("builtin");
 const bitops = @import("bitops.zig");
 
 pub const Spider = struct {
-    pub const Error = error{ OutOfBounds, Undefined, NotFound };
+    pub const Error = error{OutOfBounds} || std.mem.Allocator.Error || bitops.NthSetBitError;
 
-    const sb_size = 63488;
+    const sb_size = 63488; // superblock_size
     const Self = @This();
 
     const SelectData = struct {
@@ -13,6 +13,10 @@ pub const Spider = struct {
         ll_select: []const u16,
         sigma_hl_pow: u6,
         sigma_ll_pow: u4,
+
+        fn byteSize(self: *const SelectData) u64 {
+            return self.hl_select.len * @sizeOf(u64) + self.ll_select.len * @sizeOf(u16) + @sizeOf(Self);
+        }
     };
 
     bit_array: []align(64) const u8,
@@ -21,15 +25,19 @@ pub const Spider = struct {
     sd1: SelectData,
     sd0: SelectData,
 
-    pub fn init(allocator: std.mem.Allocator, bits: []const u8, num_bits: u64) !Self {
-        if (num_bits == 0) return Error.Undefined;
+    pub fn byteSize(self: *const Self) u64 {
+        return self.hl_rank.len * @sizeOf(u64) + self.bit_array.len + self.sd1.byteSize() + self.sd0.byteSize();
+    }
+
+    pub fn init(allocator: std.mem.Allocator, bits: []const u8, num_bits: u64) Error!Self {
+        if (num_bits == 0) return Error.OutOfBounds;
         if ((num_bits - 1) >> 3 + 1 > bits.len) return Error.OutOfBounds;
 
         const rnk = try build_rank(allocator, bits, num_bits);
         const sel1 = try build_select(allocator, rnk.count, num_bits, rnk.bit_array, false);
         const sel0 = try build_select(allocator, rnk.count, num_bits, rnk.bit_array, true);
 
-        return Spider{
+        return .{
             .hl_rank = rnk.hl_rank,
             .bit_array = rnk.bit_array,
             .sd1 = sel1,
@@ -38,7 +46,7 @@ pub const Spider = struct {
         };
     }
 
-    fn alloc_rank_arrays(allocator: std.mem.Allocator, num_bits: u64) !struct {
+    fn alloc_rank_arrays(allocator: std.mem.Allocator, num_bits: u64) std.mem.Allocator.Error!struct {
         std.ArrayListUnmanaged(u64),
         std.ArrayListAlignedUnmanaged(u8, 64),
     } {
@@ -102,7 +110,7 @@ pub const Spider = struct {
         allocator: std.mem.Allocator,
         bits: []const u8,
         num_bits: u64,
-    ) !struct { hl_rank: []u64, bit_array: []align(64) u8, count: u64 } {
+    ) Error!struct { hl_rank: []u64, bit_array: []align(64) u8, count: u64 } {
         var hl_rank, var bit_array = try alloc_rank_arrays(allocator, num_bits);
         defer hl_rank.deinit(allocator);
         defer bit_array.deinit(allocator);
@@ -129,7 +137,7 @@ pub const Spider = struct {
         num_bits: u64,
         bit_array: []align(64) u8,
         comptime flip: bool,
-    ) !SelectData {
+    ) Error!SelectData {
         var hl_select = std.ArrayListUnmanaged(u64){};
         defer hl_select.deinit(allocator);
         var ll_select = std.ArrayListUnmanaged(u16){};
@@ -137,12 +145,11 @@ pub const Spider = struct {
 
         const c_count = if (flip) num_bits - cumulative_count else cumulative_count;
 
-        const s_hl_pow: u6 = @intFromFloat(@ceil(@log2(@as(f64, @floatFromInt(sb_size * c_count)) / @as(f64, @floatFromInt(num_bits)))));
-        const s_ll_pow: u4 = @intFromFloat(@ceil(@log2(4096.0 * 0.99 * @as(f64, @floatFromInt(c_count)) / @as(f64, @floatFromInt(num_bits)))));
+        const s_hl_pow: u6 = @intCast(std.math.log2_int_ceil(u64, @intFromFloat(@as(f64, @floatFromInt(sb_size * c_count)) / @as(f64, @floatFromInt(num_bits)))));
+        const s_ll_pow: u4 = @intCast(std.math.log2_int_ceil(u64, @intFromFloat(4096.0 * 0.99 * @as(f64, @floatFromInt(c_count)) / @as(f64, @floatFromInt(num_bits)))));
 
-        try hl_select.ensureTotalCapacityPrecise(allocator, 2 + (c_count >> s_hl_pow));
-        try ll_select.ensureTotalCapacityPrecise(allocator, 2 + (c_count >> s_ll_pow));
-
+        try hl_select.ensureTotalCapacityPrecise(allocator, @as(usize, 2) + (std.math.divCeil(usize, c_count, @as(u64, 1) << s_hl_pow) catch 0));
+        try ll_select.ensureTotalCapacityPrecise(allocator, @as(usize, 2) + (std.math.divCeil(usize, c_count, @as(u64, 1) << s_ll_pow) catch 0));
         var pos: u64 = 0;
         var k: u64 = 0;
 
@@ -162,6 +169,7 @@ pub const Spider = struct {
         var hl_count: u64 = 0;
 
         var sel_n1: u64 = 0;
+
         for (k..bit_array.len) |m| {
             if (m % 64 == 0 or (m - 1) % 64 == 0) continue;
             pos = (m - ((m >> 6) + 1) * 2) << 3;
@@ -175,7 +183,7 @@ pub const Spider = struct {
                 const ones_left = (@as(u64, 1) << s_hl_pow) - hl_count;
                 const r_pos = try bitops.nthSetBitPos(byte, @intCast(ones_left));
                 hl_select.appendAssumeCapacity(((pos + r_pos) + (sb_size >> 1)) / sb_size);
-                hl_count = count - @popCount(@as(u16, byte) >> @intCast(ones_left));
+                hl_count = count - ones_left;
             }
 
             if (ll_count + count < (@as(u16, 1) << s_ll_pow)) {
@@ -184,7 +192,7 @@ pub const Spider = struct {
                 const ones_left = (@as(u16, 1) << s_ll_pow) - ll_count;
                 const r_pos = try bitops.nthSetBitPos(byte, @intCast(ones_left));
                 ll_select.appendAssumeCapacity(@intCast((pos + r_pos) - ((pos >> s_ll_pow) << s_ll_pow)));
-                ll_count = count - @popCount(@as(u16, byte) >> @intCast(ones_left));
+                ll_count = count - ones_left;
             }
 
             if (count > 0) {
@@ -213,17 +221,8 @@ pub const Spider = struct {
         self.* = undefined;
     }
 
-    pub fn rank(self: *Self, i: u64) Error!u64 {
-        return self.rank1b1(i + 1);
-    }
-
-    pub fn select(self: *Self, i: u64) Error!u64 {
-        return self.select1b1(i + 1);
-    }
-
-    pub fn rankB1(self: *Self, i: u64) Error!u64 {
-        if (i == 0) return Error.Undefined;
-        if (i > self.size) return Error.OutOfBounds;
+    pub fn rank1(self: *Self, i: u64) Error!u64 {
+        if (i == 0 or i > self.size) return Error.OutOfBounds;
 
         const x = i / 496;
         const n_bits = i - (x * 496);
@@ -244,20 +243,19 @@ pub const Spider = struct {
         return self.hl_rank[ri] + self.r_count1(x) + count;
     }
 
-    pub fn select0(self: *Self, i: u64) Error!u64 {
+    pub fn select0(self: *const Self, i: u64) Error!u64 {
         return self.select_general(i, &self.sd0, true);
     }
 
-    pub fn select1(self: *Self, i: u64) Error!u64 {
+    pub fn select1(self: *const Self, i: u64) Error!u64 {
         return self.select_general(i, &self.sd1, false);
     }
 
-    fn select_general(self: *Self, i: u64, s_data: *SelectData, comptime flip: bool) Error!u64 {
+    fn select_general(self: *const Self, i: u64, s_data: *const SelectData, comptime flip: bool) Error!u64 {
         const count = if (flip) Spider.count0 else Spider.count1;
         const r_count = if (flip) Spider.r_count0 else Spider.r_count1;
 
-        if (i == 0) return Error.Undefined;
-        if (i > count(self, self.hl_rank.len - 1)) return Error.OutOfBounds;
+        if (i == 0 or i > count(self, self.hl_rank.len - 1)) return Error.OutOfBounds;
 
         var s = (i - 1) >> s_data.sigma_hl_pow;
         // while (i <= self.hl_rank[s] or i > self.hl_rank[s + 1]) {
@@ -302,24 +300,24 @@ pub const Spider = struct {
             }
         }
 
-        return Error.Undefined;
+        return Error.NotFound;
     }
 
-    fn count0(self: *Self, i: usize) u64 {
+    fn count0(self: *const Self, i: usize) u64 {
         return (i * sb_size) - self.hl_rank[i];
     }
 
-    fn count1(self: *Self, i: usize) u64 {
+    fn count1(self: *const Self, i: usize) u64 {
         return self.hl_rank[i];
     }
 
-    fn r_count0(self: *Self, i: usize) u16 {
+    fn r_count0(self: *const Self, i: usize) u16 {
         const c1 = std.mem.readInt(u16, self.bit_array[(i << 6)..][0..2], builtin.cpu.arch.endian());
         const start: u16 = @intCast(i * (sb_size >> 7) % sb_size);
         return start - c1;
     }
 
-    fn r_count1(self: *Self, i: usize) u16 {
+    fn r_count1(self: *const Self, i: usize) u16 {
         return std.mem.readInt(u16, self.bit_array[(i << 6)..][0..2], builtin.cpu.arch.endian());
     }
 
@@ -356,33 +354,37 @@ pub const Spider = struct {
             self.* = undefined;
         }
 
-        pub fn append(self: *Builder.Self, data: anytype, n: u9) Builder.Error!void {
+        /// Insert n lsb of data
+        pub fn append(self: *Builder.Self, data: anytype, n: u16) Builder.Error!void {
             const T = @TypeOf(data);
+            const U = u8;
             if (@typeInfo(T) != .int or @typeInfo(T).int.signedness != .unsigned)
                 @compileError("Spider.Builder.add requires an unsigned integer, found " ++ @typeName(T));
 
             if (n == 0 or n > @typeInfo(T).int.bits) {
                 return Builder.Error.InvalidN;
             }
-
             var remaining = n;
             while (remaining > 0) {
-                const buffer_pos = self.bits_written & 0b111;
-                const to_write = @min(@as(u4, 8) - buffer_pos, remaining);
-                const mask = @as(u8, 0xFF) >> @intCast(8 - to_write);
-                self.buffer |= @truncate((data >> @intCast(remaining - to_write)) & mask);
-
-                if (buffer_pos + to_write >= 8) {
+                const buffer_pos: std.math.Log2IntCeil(U) = @intCast(self.bits_written % @bitSizeOf(U));
+                const to_write: std.math.Log2IntCeil(U) = @intCast(@min(@bitSizeOf(U) - buffer_pos, remaining));
+                const mask = ~@as(U, 0) >> @intCast(@as(u16, @bitSizeOf(U)) - to_write);
+                const value = @as(U, @intCast((data >> @intCast(remaining - to_write) & mask)));
+                const shift: u16 = @as(u16, @bitSizeOf(U)) - to_write - buffer_pos;
+                self.buffer |= @intCast(value << @intCast(shift));
+                if (buffer_pos + to_write >= @bitSizeOf(U)) {
                     rank_byte(self.buffer, self.bits_written >> 3, &self.cumulative_count, &self.relative_count, &self.hl_rank, &self.bit_array);
                     self.buffer = 0;
                 }
-
                 self.bits_written += to_write;
                 remaining -= to_write;
             }
         }
 
         pub fn build(self: *Builder.Self, allocator: std.mem.Allocator) !Spider {
+            if (self.buffer != 0) {
+                rank_byte(self.buffer, self.bits_written >> 3, &self.cumulative_count, &self.relative_count, &self.hl_rank, &self.bit_array);
+            }
             Spider.rank_last_byte(@intCast(self.num_bits & 0b111), &self.cumulative_count, &self.hl_rank, &self.bit_array);
 
             const bit_arr = try self.bit_array.toOwnedSlice(allocator);
@@ -395,7 +397,7 @@ pub const Spider = struct {
                 .bit_array = bit_arr,
                 .sd1 = sel1,
                 .sd0 = sel0,
-                .size = self.num_bits,
+                .size = self.bits_written,
             };
         }
     };
@@ -405,20 +407,28 @@ test "spiderBuilder" {
     const seed = 0x4C471781B1;
     const buf_size = 1 << 10;
 
+    const U = usize;
+
     var r = std.Random.DefaultPrng.init(seed);
     var random = r.random();
 
-    var data = try std.testing.allocator.alloc(u8, buf_size);
+    var data = try std.testing.allocator.alloc(U, buf_size);
     defer std.testing.allocator.free(data);
-
     data.len = buf_size;
-    random.bytes(data);
+    for (0..buf_size) |i| {
+        data[i] = random.int(U);
+    }
 
-    var builder = try Spider.Builder.initWithTotalCapacity(std.testing.allocator, buf_size * 8);
+    var builder = try Spider.Builder.initWithTotalCapacity(std.testing.allocator, buf_size * @bitSizeOf(U));
     defer builder.deinit(std.testing.allocator);
 
     for (data) |x| {
-        try builder.append(x, 8);
+        const toAdd = random.uintAtMost(u16, @bitSizeOf(U) - 1) + 1;
+        const remaining = @bitSizeOf(U) - toAdd;
+        try builder.append(x >> @intCast(remaining), toAdd);
+        if (remaining != 0) {
+            try builder.append(x, remaining);
+        }
     }
 
     var spider = try builder.build(std.testing.allocator);
@@ -427,15 +437,15 @@ test "spiderBuilder" {
     var count: u64 = 0;
 
     for (0..buf_size) |i| {
-        const bit = random.uintAtMost(u4, 8);
-        const expectation = count + @popCount(@as(u16, data[i]) >> @intCast(8 - bit));
-        const rank = try spider.rankB1((i * 8) + bit);
+        const bit = random.uintAtMost(U, @bitSizeOf(U) - 1) + 1;
+        const expectation = count + @popCount(data[i] >> @intCast(@bitSizeOf(U) - bit));
+        const rank = try spider.rank1((i * @bitSizeOf(U)) + bit);
         try std.testing.expectEqual(expectation, rank);
         count += @popCount(data[i]);
     }
 
-    try std.testing.expectEqual(count, try spider.rankB1(buf_size * 8));
-    try std.testing.expectError(Spider.Error.Undefined, spider.rankB1(0));
+    try std.testing.expectEqual(count, try spider.rank1(buf_size * @bitSizeOf(U)));
+    try std.testing.expectError(Spider.Error.OutOfBounds, spider.rank1(0));
 }
 
 test "spiderRank" {
@@ -459,13 +469,13 @@ test "spiderRank" {
     for (0..buf_size) |i| {
         const bit = random.uintAtMost(u4, 8);
         const expectation = count + @popCount(@as(u16, data[i]) >> @intCast(8 - bit));
-        const rank = try spider.rankB1((i * 8) + bit);
+        const rank = try spider.rank1((i * 8) + bit);
         try std.testing.expectEqual(expectation, rank);
         count += @popCount(data[i]);
     }
 
-    try std.testing.expectEqual(count, try spider.rankB1(buf_size * 8));
-    try std.testing.expectError(Spider.Error.Undefined, spider.rankB1(0));
+    try std.testing.expectEqual(count, try spider.rank1(buf_size * 8));
+    try std.testing.expectError(Spider.Error.OutOfBounds, spider.rank1(0));
 }
 
 test "spiderSelect1" {
@@ -498,7 +508,7 @@ test "spiderSelect1" {
         count += @popCount(data[i]);
     }
 
-    try std.testing.expectError(Spider.Error.Undefined, spider.select1(0));
+    try std.testing.expectError(Spider.Error.OutOfBounds, spider.select1(0));
     try std.testing.expectEqual(2, spider.select1(1));
 }
 
@@ -533,6 +543,6 @@ test "spiderSelect0" {
         count += @popCount(byte);
     }
 
-    try std.testing.expectError(Spider.Error.Undefined, spider.select1(0));
+    try std.testing.expectError(Spider.Error.OutOfBounds, spider.select1(0));
     try std.testing.expectEqual(2, spider.select1(1));
 }
