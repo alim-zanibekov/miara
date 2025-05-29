@@ -1,6 +1,8 @@
 const std = @import("std");
 const s = @import("spider.zig");
 const bit = @import("bit.zig");
+const iterator = @import("iterator.zig");
+const iface = @import("interface.zig");
 
 pub const EliasFano = GenericEliasFano(u64);
 
@@ -21,9 +23,11 @@ pub fn GenericEliasFano(T: type) type {
             return self.higher_bits.byteSize() + self.lower_bits.byteSize() + @sizeOf(Self);
         }
 
-        pub fn init(allocator: std.mem.Allocator, universe: T, arr: []const T) !Self {
+        pub fn init(allocator: std.mem.Allocator, universe: T, TIter: type, iter: TIter) !Self {
+            iface.checkImplementsGuard(iterator.Iterator(T), iface.UnPtr(TIter));
+
             const m = universe;
-            const n = arr.len;
+            const n = iter.size();
 
             const log_m = std.math.log2_int_ceil(T, m);
             const log_n = std.math.log2_int_ceil(usize, n);
@@ -39,7 +43,7 @@ pub fn GenericEliasFano(T: type) type {
 
             var bucket: T = 0;
             var max: T = 0;
-            for (arr) |it| {
+            while (iter.next()) |it| {
                 max = @max(max, it);
                 if (max != it) {
                     return error.NonMonotomicallyIncreasing;
@@ -59,7 +63,7 @@ pub fn GenericEliasFano(T: type) type {
                 .lower_bits = lb,
                 .higher_bits = spider,
                 .low_n = low_n,
-                .len = arr.len,
+                .len = iter.size(),
             };
         }
 
@@ -69,14 +73,14 @@ pub fn GenericEliasFano(T: type) type {
         }
 
         // Get i-th element
-        pub fn get(self: *Self, i: usize) !T {
+        pub fn get(self: *const Self, i: usize) !T {
             const h_bits = try self.higher_bits.select1(i + 1) - i;
             const l_bits = if (self.low_n > 0) try self.lower_bits.getRt(T, @intCast(self.low_n), self.low_n * i) else 0;
             return (h_bits << @intCast(self.low_n)) | l_bits;
         }
 
         // Get next greater or equal than `num`
-        pub fn getNextGEQ(self: *Self, num: T) !T {
+        pub fn getNextGEQ(self: *const Self, num: T) !T {
             const i = num >> @intCast(self.low_n);
             var pos = if (i > 0) try self.higher_bits.select0(i) - i else 0;
             var result = try self.get(pos);
@@ -102,7 +106,8 @@ test "eliasFanoCodec" {
         data[i] = data[i - 1] + random.uintLessThan(u64, ~@as(u32, 0) / n);
     }
 
-    var ef = try EliasFano.init(std.testing.allocator, data[data.len - 1], data);
+    var iter = iterator.SliceIterator(u64).init(data);
+    var ef = try EliasFano.init(std.testing.allocator, data[data.len - 1], @TypeOf(&iter), &iter);
     defer ef.deinit(std.testing.allocator);
 
     for (data, 0..) |it, i| {
