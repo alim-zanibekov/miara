@@ -76,6 +76,98 @@ pub fn BloomFilter(
     };
 }
 
+pub const LRUFilter = struct {
+    const Self = @This();
+    const Node = std.DoublyLinkedList(void).Node;
+
+    const Entry = struct {
+        key: []const u8,
+        node: Node = .{ .data = {} },
+    };
+
+    const HashMap = std.StringHashMapUnmanaged(*Entry);
+
+    hash_map: HashMap,
+    entries: std.ArrayListUnmanaged(Entry), // arena
+    queue: std.DoublyLinkedList(void),
+    free_nodes: std.DoublyLinkedList(void),
+
+    pub fn init(allocator: std.mem.Allocator, capacity: u32) !Self {
+        if (capacity == 0) return error.InvalidCapacity;
+
+        var entries = try std.ArrayListUnmanaged(Entry).initCapacity(allocator, capacity);
+        entries.expandToCapacity();
+        @memset(entries.items, Entry{ .key = undefined });
+
+        var free_nodes = std.DoublyLinkedList(void){};
+        for (entries.items) |*it| free_nodes.append(&it.node);
+
+        var hash_map = HashMap{};
+        try hash_map.ensureTotalCapacity(
+            allocator,
+            @intCast((@as(u64, capacity) * 100) / std.hash_map.default_max_load_percentage + 2),
+        );
+
+        return Self{
+            .entries = entries,
+            .queue = std.DoublyLinkedList(void){},
+            .free_nodes = free_nodes,
+            .hash_map = hash_map,
+        };
+    }
+
+    pub fn clear(self: *Self) void {
+        self.hash_map.clearRetainingCapacity();
+        self.free_nodes.concatByMoving(&self.queue);
+    }
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        self.entries.deinit(allocator);
+        self.hash_map.deinit(allocator);
+        self.* = undefined;
+    }
+
+    fn moveToFront(self: *Self, entry: *Entry) void {
+        self.queue.remove(&entry.node);
+        self.queue.prepend(&entry.node);
+    }
+
+    fn removeTail(self: *Self) void {
+        if (self.queue.pop()) |node| {
+            const entry: *Entry = @fieldParentPtr("node", node);
+            _ = self.hash_map.remove(entry.key);
+            self.free_nodes.append(node);
+        }
+    }
+
+    pub fn put(self: *Self, key: []const u8) void {
+        if (self.hash_map.get(key)) |k| {
+            self.moveToFront(k);
+        }
+
+        if (self.free_nodes.len == 0) {
+            self.removeTail();
+        }
+
+        if (self.free_nodes.pop()) |node| {
+            const entry: *Entry = @fieldParentPtr("node", node);
+            entry.key = key;
+            self.hash_map.putAssumeCapacity(entry.key, entry);
+            self.queue.prepend(&entry.node);
+        } else {
+            unreachable;
+        }
+    }
+
+    pub fn contains(self: *Self, key: []const u8) bool {
+        if (self.hash_map.get(key)) |k| {
+            self.moveToFront(k);
+            return true;
+        }
+        return false;
+    }
+};
+
 // https://stackoverflow.com/questions/658439/how-many-hash-functions-does-my-bloom-filter-need
 // The number of bits needed for given amount of keys and false positive rate
 pub fn bloomBitSize(n_keys: usize, fp_rate: f64) u64 {
@@ -139,6 +231,32 @@ test "BloomFilter" {
     }
 
     try std.testing.expect(!bf.contains("water"));
+}
+
+test "LRUFilter" {
+    const allocator = std.testing.allocator;
+    var r = std.Random.DefaultPrng.init(0x4C27A681B2);
+    const random = r.random();
+
+    const n = 128;
+    var rs = try util.randomStrings(allocator, n, 30, random);
+    defer rs.deinit(allocator);
+
+    var lf = try LRUFilter.init(std.testing.allocator, 64);
+    defer lf.deinit(std.testing.allocator);
+
+    for (rs.strings) |s| {
+        lf.put(s);
+    }
+    for (rs.strings, 0..) |s, i| {
+        if (i >= 64) {
+            try std.testing.expect(lf.contains(s));
+        } else {
+            try std.testing.expect(!lf.contains(s));
+        }
+    }
+
+    try std.testing.expect(!lf.contains("watermelon"));
 }
 
 const toF64 = util.toF64;
