@@ -36,6 +36,7 @@ fn StringElementType(comptime T: type) type {
 
 pub fn SymSpell(
     comptime Word: type,
+    comptime compressEdits: bool,
 ) type {
     comptime if (!isStringType(Word)) @compileError("Unsupported string type " ++ @typeName(Word));
     const T = StringElementType(Word);
@@ -77,7 +78,7 @@ pub fn SymSpell(
         }
     }.func;
 
-    const WordEdit = struct { i_word: u32, edit: []T };
+    const WordEdit = struct { edit: []T, i_word: u32, count: u32 };
 
     const SortedEditsIterator = struct {
         array: []WordEdit,
@@ -163,7 +164,7 @@ pub fn SymSpell(
                 }
             }
 
-            fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
                 allocator.free(self.segmented);
                 allocator.free(self.corrected);
             }
@@ -191,19 +192,22 @@ pub fn SymSpell(
         dict: []Token,
         dict_stats: DictStats,
         pthash: PTHash.Type,
-        edits_index: EliasFano,
+        edits_index_ef: if (compressEdits) EliasFano else void,
+        edits_index: if (compressEdits) void else []usize,
         edits_values: []u32,
         punctuation: []const []const T = &.{ &.{','}, &.{']'}, &.{'['}, &.{')'}, &.{'('}, &.{'}'}, &.{'{'}, &.{'.'} },
         separators: []const []const T = &.{&.{' '}},
         segmentation_token: []const T = &.{' '},
 
         assume_ed_increases: bool = true,
-        // word_max_size: usize,
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.pthash.deinit(allocator);
-            self.edits_index.deinit(allocator);
-            // allocator.free(self.edits_index);
+            if (compressEdits) {
+                self.edits_index_ef.deinit(allocator);
+            } else {
+                allocator.free(self.edits_index);
+            }
             allocator.free(self.edits_values);
             self.* = undefined;
         }
@@ -275,6 +279,7 @@ pub fn SymSpell(
                     const str = try arena.dupe(T, generator.getValue());
                     try word_edits.append(arena, WordEdit{
                         .i_word = @intCast(i),
+                        .count = it.count,
                         .edit = str,
                     });
                 }
@@ -300,61 +305,122 @@ pub fn SymSpell(
             }));
             errdefer ph.deinit(main_allocator);
 
-            var word_edits_groups = try arena.alloc([]WordEdit, ph.size());
-            @memset(word_edits_groups, &.{});
+            if (compressEdits) {
+                var word_edits_groups = try arena.alloc([]WordEdit, ph.size());
+                @memset(word_edits_groups, &.{});
 
-            var start_i: usize = 0;
-            var prev_idx = try ph.get(word_edits.items[0].edit);
+                var start_i: usize = 0;
+                var prev_idx = try ph.get(word_edits.items[0].edit);
 
-            // Sort word_edits in EliasFano compressible order
-            for (1..word_edits.items.len) |i| {
-                const hash = try ph.get(word_edits.items[i].edit);
-                if (hash == prev_idx) continue;
-                word_edits_groups[prev_idx] = word_edits.items[start_i..i];
-                start_i = i;
-                prev_idx = hash;
-            }
-            word_edits_groups[prev_idx] = word_edits.items[start_i..];
+                // Sort word_edits in EliasFano compressible order
+                for (1..word_edits.items.len) |i| {
+                    const hash = try ph.get(word_edits.items[i].edit);
+                    if (hash == prev_idx) continue;
+                    word_edits_groups[prev_idx] = word_edits.items[start_i..i];
+                    start_i = i;
+                    prev_idx = hash;
+                }
+                word_edits_groups[prev_idx] = word_edits.items[start_i..];
+                var edits_index = try arena.alloc(usize, ph.size());
 
-            var edits_index = try arena.alloc(usize, ph.size());
-            // errdefer main_allocator.free(edits_index);
+                var edits_values = try main_allocator.alloc(u32, word_edits.items.len + ph.size() + 1);
+                errdefer main_allocator.free(edits_values);
+                @memset(edits_index, 0);
+                @memset(edits_values, 0);
 
-            var edits_values = try main_allocator.alloc(u32, word_edits.items.len + ph.size() + 1);
-            errdefer main_allocator.free(edits_values);
-            @memset(edits_index, 0);
-            @memset(edits_values, 0);
+                var j: usize = 0;
+                for (word_edits_groups, 0..) |group, hash| {
+                    if (group.len == 0) {
+                        // for EliasFano
+                        edits_index[hash] = edits_index[hash -| 1];
+                        continue;
+                    }
 
-            var j: usize = 0;
-            for (word_edits_groups, 0..) |group, hash| {
-                if (group.len == 0) {
-                    // for EliasFano
-                    edits_index[hash] = edits_index[hash -| 1];
-                    continue;
+                    edits_index[hash] = j;
+                    const i_meta = j;
+
+                    // If we sort edits_values for a group based on count, we can early terminate in Searcher
+                    // in case we already find a word (in edits_values) with theoreticaly lowest edit distance for
+                    // the current delete distance
+                    std.mem.sort(WordEdit, group, {}, struct {
+                        fn func(_: void, a: WordEdit, b: WordEdit) bool {
+                            return a.count > b.count;
+                        }
+                    }.func);
+
+                    edits_values[j + 1] = group[0].i_word;
+                    j += 2;
+                    for (1..group.len) |k| {
+                        if (group[k].i_word == group[k - 1].i_word) continue;
+                        edits_values[j] = group[k].i_word;
+                        j += 1;
+                    }
+                    edits_values[i_meta] = (@as(u32, @intCast(j - i_meta - 1)) << 16) |
+                        (std.hash.Murmur3_32.hash(group[0].edit) & 0x0000FFFF);
                 }
 
-                edits_index[hash] = j;
-                const i_meta = j;
-                edits_values[j + 1] = group[0].i_word;
-                j += 2;
-                for (1..group.len) |k| {
-                    if (group[k].i_word == group[k - 1].i_word) continue;
-                    edits_values[j] = group[k].i_word;
-                    j += 1;
+                var ef_iter = iterator.SliceIterator(usize).init(edits_index);
+                const edits_index_ef = try EliasFano.init(main_allocator, edits_index[edits_index.len - 1], @TypeOf(&ef_iter), &ef_iter);
+                // errdefer edits_index_ef.deinit(main_allocator);
+
+                return Self{
+                    .pthash = ph,
+                    .edits_values = edits_values,
+                    .edits_index_ef = edits_index_ef,
+                    .dict = dict,
+                    .dict_stats = dict_stats,
+                    .edits_index = undefined,
+                };
+            } else {
+                var edits_index = try main_allocator.alloc(usize, ph.size());
+                errdefer main_allocator.free(edits_index);
+
+                var edits_values = try main_allocator.alloc(u32, word_edits.items.len + ph.size() + 1);
+                errdefer main_allocator.free(edits_values);
+
+                @memset(edits_index, 0);
+                @memset(edits_values, 0);
+
+                var start_i: usize = 0;
+                var prev_idx = try ph.get(word_edits.items[0].edit);
+                var j: usize = 0;
+
+                for (1..word_edits.items.len) |i| {
+                    const hash = try ph.get(word_edits.items[i].edit);
+                    if (hash == prev_idx) continue;
+
+                    edits_index[prev_idx] = j;
+                    const i_meta = j;
+
+                    std.mem.sort(WordEdit, word_edits.items[start_i..i], {}, struct {
+                        fn func(_: void, a: WordEdit, b: WordEdit) bool {
+                            return a.count > b.count;
+                        }
+                    }.func);
+
+                    edits_values[j + 1] = word_edits.items[start_i].i_word;
+                    j += 2;
+                    for ((start_i + 1)..i) |k| {
+                        if (word_edits.items[k].i_word == word_edits.items[k - 1].i_word) continue;
+                        edits_values[j] = word_edits.items[k].i_word;
+                        j += 1;
+                    }
+                    edits_values[i_meta] = (@as(u32, @intCast(j - i_meta - 1)) << 16) |
+                        (std.hash.Murmur3_32.hash(word_edits.items[start_i].edit) & 0x0000FFFF);
+
+                    start_i = i;
+                    prev_idx = hash;
                 }
-                edits_values[i_meta] = (@as(u32, @intCast(j - i_meta - 1)) << 16) |
-                    (std.hash.Murmur3_32.hash(group[0].edit) & 0x0000FFFF);
+
+                return Self{
+                    .pthash = ph,
+                    .edits_values = edits_values,
+                    .edits_index = edits_index,
+                    .dict = dict,
+                    .dict_stats = dict_stats,
+                    .edits_index_ef = undefined,
+                };
             }
-
-            var ef_iter = iterator.SliceIterator(usize).init(edits_index);
-            const ef_edits_index = try EliasFano.init(main_allocator, edits_index[edits_index.len - 1], @TypeOf(&ef_iter), &ef_iter);
-
-            return Self{
-                .pthash = ph,
-                .edits_values = edits_values,
-                .edits_index = ef_edits_index,
-                .dict = dict,
-                .dict_stats = dict_stats,
-            };
         }
 
         pub fn Searcher(EditsDeduper: type) type {
@@ -371,9 +437,9 @@ pub fn SymSpell(
                 ed_buffer_1: if (Word == UTF8Buffer) []u32 else void,
                 ed_buffer_2: if (Word == UTF8Buffer) []u32 else void,
 
-                fn init(sym_spell: *const Self, allocator: std.mem.Allocator) !@This() {
+                pub fn init(sym_spell: *const Self, allocator: std.mem.Allocator) !@This() {
                     const generator = try EditsGenerator([]const T, EditsDeduper)
-                    .init(
+                        .init(
                         allocator,
                         sym_spell.dict_stats.word_max_size + sym_spell.dict_stats.max_distance * 4, // * 4 in case of utf8
                     );
@@ -397,7 +463,7 @@ pub fn SymSpell(
                     };
                 }
 
-                fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
                     allocator.free(self.ed_buffer);
                     if (Word == UTF8Buffer) {
                         allocator.free(self.ed_buffer_1);
@@ -407,7 +473,7 @@ pub fn SymSpell(
                     self.generator.deinit(allocator);
                 }
 
-                fn load(self: *@This(), word: []const T, max_distance: usize, edits_deduper: EditsDeduper) !void {
+                pub fn load(self: *@This(), word: []const T, max_distance: usize, edits_deduper: EditsDeduper) !void {
                     const len = strLen(word);
                     if (len > self.sym_spell.dict_stats.word_max_len + self.sym_spell.dict_stats.max_distance) {
                         // no chances to find something useful
@@ -422,59 +488,122 @@ pub fn SymSpell(
                     try self.generator.load(word, self.max_distance, edits_deduper);
                 }
 
-                fn next(self: *@This()) !bool {
-                    if (!self.generator.next()) return false;
-                    const generator = self.generator;
+                fn getEditDistance(self: *@This(), str1: []const T, str2: []const T) u32 {
+                    if (Word == UTF8Buffer) {
+                        const s1 = try utf8ToU32OnBuffer(self.ed_buffer_1, str1);
+                        const s2 = try utf8ToU32OnBuffer(self.ed_buffer_2, str2);
+                        return editDistanceBufferUTF8(self.ed_buffer, s1, s2);
+                    }
+                    return editDistanceBuffer(self.ed_buffer, str1, str2);
+                }
 
-                    const gen_token = generator.getValue();
-                    const hash = try self.sym_spell.pthash.get(gen_token);
-                    const d_ref = try self.sym_spell.edits_index.get(hash);
-                    {
-                        const mm_hash = std.hash.Murmur3_32.hash(gen_token) & 0x0000FFFF;
-                        const mm_hash_chk = self.sym_spell.edits_values[d_ref] & 0x0000FFFF;
-                        if (mm_hash != mm_hash_chk) {
-                            return self.next();
-                            // Compiler Bug
-                            // return @call(.always_tail, next, .{self});
+                pub fn next(self: *@This()) !bool {
+                    while (self.generator.next()) {
+                        const gen_token = self.generator.getValue();
+                        const hash = try self.sym_spell.pthash.get(gen_token);
+                        const d_ref = try self.sym_spell.getEditsIndex(hash);
+                        {
+                            const mm_hash = std.hash.Murmur3_32.hash(gen_token) & 0x0000FFFF;
+                            const mm_hash_chk = self.sym_spell.edits_values[d_ref] & 0x0000FFFF;
+                            if (mm_hash != mm_hash_chk) continue;
+                        }
+                        const size = self.sym_spell.edits_values[d_ref] >> 16;
+
+                        for ((d_ref + 1)..(d_ref + 1 + size)) |i| {
+                            const word_i = self.sym_spell.edits_values[i];
+                            const it = self.sym_spell.dict[self.sym_spell.edits_values[i]];
+                            if (@abs(@as(i64, @intCast(strLen(it.word))) - @as(i64, @intCast(self.len))) > self.max_distance) {
+                                continue;
+                            }
+                            if (self.seen.contains(word_i)) continue;
+                            try self.seen.put(word_i, {});
+
+                            const actual_distance = self.getEditDistance(it.word, gen_token);
+                            if (actual_distance <= self.max_distance) {
+                                self.hit = .{
+                                    .count = it.count,
+                                    .word = it.word,
+                                    .edit_distance = actual_distance,
+                                    .delete_distance = self.generator.current_distance,
+                                };
+                                return true;
+                            }
                         }
                     }
-                    const size = self.sym_spell.edits_values[d_ref] >> 16;
+                    return false;
+                }
 
-                    for ((d_ref + 1)..(d_ref + 1 + size)) |i| {
-                        const word_i = self.sym_spell.edits_values[i];
-                        const it = self.sym_spell.dict[self.sym_spell.edits_values[i]];
-                        if (@abs(@as(i64, @intCast(strLen(it.word))) - @as(i64, @intCast(self.len))) > self.max_distance) {
-                            continue;
+                pub fn top(self: *@This()) !?Hit {
+                    var best_hit = Hit{
+                        .count = 0,
+                        .word = &.{},
+                        .edit_distance = std.math.maxInt(u32),
+                        .delete_distance = std.math.maxInt(u32),
+                    };
+
+                    while (self.generator.next()) {
+                        const delete_distance = self.generator.current_distance;
+                        if (self.sym_spell.assume_ed_increases and delete_distance > best_hit.delete_distance) {
+                            break;
                         }
 
-                        if (self.seen.contains(word_i)) continue;
-                        try self.seen.put(word_i, {});
+                        const gen_token = self.generator.getValue();
+                        const hash = try self.sym_spell.pthash.get(gen_token);
+                        const d_ref = try self.sym_spell.getEditsIndex(hash);
+                        {
+                            const mm_hash = std.hash.Murmur3_32.hash(gen_token) & 0x0000FFFF;
+                            const mm_hash_chk = self.sym_spell.edits_values[d_ref] & 0x0000FFFF;
+                            if (mm_hash != mm_hash_chk) continue;
+                        }
+                        const size = self.sym_spell.edits_values[d_ref] >> 16;
 
-                        const actual_distance = if (Word == UTF8Buffer) ad: {
-                            const s1 = try utf8ToU32OnBuffer(self.ed_buffer_1, it.word);
-                            const s2 = try utf8ToU32OnBuffer(self.ed_buffer_2, gen_token);
-                            break :ad editDistanceBufferUTF8(self.ed_buffer, s1, s2);
-                        } else editDistanceBuffer(self.ed_buffer, it.word, gen_token);
+                        for ((d_ref + 1)..(d_ref + 1 + size)) |i| {
+                            const word_i = self.sym_spell.edits_values[i];
+                            const it = self.sym_spell.dict[self.sym_spell.edits_values[i]];
+                            if (@abs(@as(i64, @intCast(strLen(it.word))) - @as(i64, @intCast(self.len))) > self.max_distance) {
+                                continue;
+                            }
 
-                        if (actual_distance <= self.max_distance) {
-                            self.hit = .{
-                                .count = it.count,
-                                .word = it.word,
-                                .edit_distance = actual_distance,
-                                .delete_distance = self.generator.current_distance,
-                            };
-                            return true;
+                            // edits_values for a specific word are ordered by count
+                            // when best_hit.edit_distance == best_hit.delete_distance we already found the minimal edit distance
+                            if (self.sym_spell.assume_ed_increases and
+                                best_hit.edit_distance == best_hit.delete_distance and
+                                it.count < best_hit.count) break;
+
+                            if (self.seen.contains(word_i)) continue;
+                            try self.seen.put(word_i, {});
+
+                            const actual_distance = self.getEditDistance(it.word, gen_token);
+
+                            if (actual_distance <= self.max_distance and
+                                (actual_distance < best_hit.edit_distance or
+                                    (actual_distance == best_hit.edit_distance and it.count > best_hit.count)))
+                            {
+                                best_hit = .{
+                                    .count = it.count,
+                                    .word = it.word,
+                                    .edit_distance = actual_distance,
+                                    .delete_distance = delete_distance,
+                                };
+
+                                if (best_hit.edit_distance == 0) {
+                                    return best_hit; // can't do better, exact match
+                                }
+                            }
                         }
                     }
-                    return self.next();
-                    // Compiler Bug
-                    // return @call(.always_tail, next, .{self});
+                    if (best_hit.word.len > 0) return best_hit;
+                    return null;
                 }
             };
         }
 
         pub fn getEditsIndex(self: *const Self, hash: u64) !usize {
-            return try self.edits_index.get(hash);
+            if (compressEdits) {
+                return try self.edits_index_ef.get(hash);
+            } else {
+                return self.edits_index[hash];
+            }
         }
 
         pub fn isPunctuation(self: *const Self, str: []const T) bool {
@@ -607,56 +736,13 @@ pub fn SymSpell(
                     var best_hit_word: []const T = &.{};
                     var best_hit_count: u32 = 0;
 
-                    // dict: win, wind
-                    // wind -> wind
-                    // win  -> wind, win
-                    // wid  -> wind
-                    // wnd  -> wind
-                    // ind  -> wind
-                    // wi   -> wind, win
-                    // wn   -> wind, win
-                    // wd   -> wind
-                    // w    -> win
-                    // i    -> win
-                    // n    -> win
-                    //
-                    // dd - 0
-                    // wwin -> nothing
-                    // dd - 1
-                    // wwi -> nothing
-                    // win -> wind: ed 1, win: ed 0
-                    if (self.assume_ed_increases and self.dict_stats.count_uniform) {
-                        if (try searcher.next()) {
-                            const word = searcher.hit.word;
-                            @memcpy(buffer_2[0..word.len], word);
-                            best_hit_word = buffer_2[0..word.len];
-                            best_hit_ed = searcher.hit.edit_distance;
-                            best_hit_count = searcher.hit.count;
-                        }
-                    } else {
-                        var check: bool = false;
-                        while (try searcher.next()) {
-                            // the Searcher iterates word deletes in a way that only increases the delete distance
-                            // and levenshtein edit distance can't improve in the next loop over current (can't prove this :D)
-                            if (self.assume_ed_increases and searcher.hit.delete_distance > best_hit_dd) {
-                                check = true; // break;
-                            }
-
-                            if (searcher.hit.edit_distance < best_hit_ed or
-                                (searcher.hit.edit_distance == best_hit_ed and searcher.hit.count > best_hit_count))
-                                {
-                                    if (check) unreachable;
-
-                                    const word = searcher.hit.word;
-                                    @memcpy(buffer_2[0..word.len], word);
-                                    best_hit_word = buffer_2[0..word.len];
-                                    best_hit_ed = searcher.hit.edit_distance;
-                                    best_hit_count = searcher.hit.count;
-                                    best_hit_dd = searcher.hit.delete_distance;
-
-                                    if (best_hit_ed == 0) break; // can't do better, exact match
-                            }
-                        }
+                    if (try searcher.top()) |top| {
+                        const word = top.word;
+                        @memcpy(buffer_2[0..word.len], word);
+                        best_hit_word = buffer_2[0..word.len];
+                        best_hit_ed = top.edit_distance;
+                        best_hit_count = top.count;
+                        best_hit_dd = top.delete_distance;
                     }
 
                     var top_result: []const T = undefined;
@@ -681,25 +767,25 @@ pub fn SymSpell(
                             suggestions[c].distance_sum + separator_length + top_ed == suggestions[d].distance_sum) and
                             (suggestions[d].probability_log_sum < suggestions[c].probability_log_sum + top_probability_log)) or
                             suggestions[c].distance_sum + separator_length + top_ed < suggestions[d].distance_sum)
-                            {
-                                const n_1 = suggestions[c].segmented.len + space.len + part.len;
-                                const n_2 = suggestions[c].corrected.len + space.len + top_result.len;
+                        {
+                            const n_1 = suggestions[c].segmented.len + space.len + part.len;
+                            const n_2 = suggestions[c].corrected.len + space.len + top_result.len;
 
-                                if (d == c) {
-                                    const start_1 = suggestions[d].segmented.len;
-                                    const start_2 = suggestions[d].segmented.len;
-                                    try suggestions[d].expand(allocator, n_1, n_2, true);
-                                    memcpuMultiple(T, suggestions[d].segmented[start_1..], &.{ space, part });
-                                    memcpuMultiple(T, suggestions[d].corrected[start_2..], &.{ space, top_result });
-                                } else {
-                                    try suggestions[d].expand(allocator, n_1, n_2, false);
-                                    memcpuMultiple(T, suggestions[d].segmented, &.{ suggestions[c].segmented, space, part });
-                                    memcpuMultiple(T, suggestions[d].corrected, &.{ suggestions[c].corrected, space, top_result });
-                                }
-
-                                suggestions[d].distance_sum = suggestions[c].distance_sum + @as(u32, @intCast(separator_length + top_ed));
-                                suggestions[d].probability_log_sum = suggestions[c].probability_log_sum + top_probability_log;
+                            if (d == c) {
+                                const start_1 = suggestions[d].segmented.len;
+                                const start_2 = suggestions[d].segmented.len;
+                                try suggestions[d].expand(allocator, n_1, n_2, true);
+                                memcpuMultiple(T, suggestions[d].segmented[start_1..], &.{ space, part });
+                                memcpuMultiple(T, suggestions[d].corrected[start_2..], &.{ space, top_result });
+                            } else {
+                                try suggestions[d].expand(allocator, n_1, n_2, false);
+                                memcpuMultiple(T, suggestions[d].segmented, &.{ suggestions[c].segmented, space, part });
+                                memcpuMultiple(T, suggestions[d].corrected, &.{ suggestions[c].corrected, space, top_result });
                             }
+
+                            suggestions[d].distance_sum = suggestions[c].distance_sum + @as(u32, @intCast(separator_length + top_ed));
+                            suggestions[d].probability_log_sum = suggestions[c].probability_log_sum + top_probability_log;
+                        }
                     }
                 }
 
@@ -1207,7 +1293,7 @@ test "EditsGenerationUTF8" {
             std.debug.print("Word: {s}\n", .{word});
 
             var generator = try EditsGenerator(UTF8Buffer, @TypeOf(deduper))
-            .init(allocator, word.len);
+                .init(allocator, word.len);
 
             defer generator.deinit(allocator);
             try generator.load(word, distance, deduper);
@@ -1235,7 +1321,7 @@ test "SymSpell" {
     var r = std.Random.DefaultPrng.init(0x4C27A681B1);
     const random = r.random();
 
-    const Type = SymSpell([]const u8);
+    const Type = SymSpell([]const u8, true);
 
     var entries = try allocator.alloc(Type.Token, n);
     defer {
