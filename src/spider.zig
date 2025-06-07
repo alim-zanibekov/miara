@@ -403,6 +403,8 @@ pub const Spider = struct {
     };
 };
 
+const testing = std.testing;
+
 test "spiderBuilder" {
     const seed = 0x4C471781B1;
     const buf_size = 1 << 10;
@@ -412,15 +414,15 @@ test "spiderBuilder" {
     var r = std.Random.DefaultPrng.init(seed);
     var random = r.random();
 
-    var data = try std.testing.allocator.alloc(U, buf_size);
-    defer std.testing.allocator.free(data);
+    var data = try testing.allocator.alloc(U, buf_size);
+    defer testing.allocator.free(data);
     data.len = buf_size;
     for (0..buf_size) |i| {
         data[i] = random.int(U);
     }
 
-    var builder = try Spider.Builder.initWithTotalCapacity(std.testing.allocator, buf_size * @bitSizeOf(U));
-    defer builder.deinit(std.testing.allocator);
+    var builder = try Spider.Builder.initWithTotalCapacity(testing.allocator, buf_size * @bitSizeOf(U));
+    defer builder.deinit(testing.allocator);
 
     for (data) |x| {
         const toAdd = random.uintAtMost(u16, @bitSizeOf(U) - 1) + 1;
@@ -431,8 +433,8 @@ test "spiderBuilder" {
         }
     }
 
-    var spider = try builder.build(std.testing.allocator);
-    defer spider.deinit(std.testing.allocator);
+    var spider = try builder.build(testing.allocator);
+    defer spider.deinit(testing.allocator);
 
     var count: u64 = 0;
 
@@ -440,12 +442,12 @@ test "spiderBuilder" {
         const bit = random.uintAtMost(U, @bitSizeOf(U) - 1) + 1;
         const expectation = count + @popCount(data[i] >> @intCast(@bitSizeOf(U) - bit));
         const rank = try spider.rank1((i * @bitSizeOf(U)) + bit);
-        try std.testing.expectEqual(expectation, rank);
+        try testing.expectEqual(expectation, rank);
         count += @popCount(data[i]);
     }
 
-    try std.testing.expectEqual(count, try spider.rank1(buf_size * @bitSizeOf(U)));
-    try std.testing.expectError(Spider.Error.OutOfBounds, spider.rank1(0));
+    try testing.expectEqual(count, try spider.rank1(buf_size * @bitSizeOf(U)));
+    try testing.expectError(Spider.Error.OutOfBounds, spider.rank1(0));
 }
 
 test "spiderRank" {
@@ -455,14 +457,14 @@ test "spiderRank" {
     var r = std.Random.DefaultPrng.init(seed);
     var random = r.random();
 
-    var data = try std.testing.allocator.alloc(u8, buf_size);
-    defer std.testing.allocator.free(data);
+    var data = try testing.allocator.alloc(u8, buf_size);
+    defer testing.allocator.free(data);
 
     data.len = buf_size;
     random.bytes(data);
 
-    var spider = try Spider.init(std.testing.allocator, data, buf_size * 8);
-    defer spider.deinit(std.testing.allocator);
+    var spider = try Spider.init(testing.allocator, data, buf_size * 8);
+    defer spider.deinit(testing.allocator);
 
     var count: u64 = 0;
 
@@ -470,12 +472,12 @@ test "spiderRank" {
         const bit = random.uintAtMost(u4, 8);
         const expectation = count + @popCount(@as(u16, data[i]) >> @intCast(8 - bit));
         const rank = try spider.rank1((i * 8) + bit);
-        try std.testing.expectEqual(expectation, rank);
+        try testing.expectEqual(expectation, rank);
         count += @popCount(data[i]);
     }
 
-    try std.testing.expectEqual(count, try spider.rank1(buf_size * 8));
-    try std.testing.expectError(Spider.Error.OutOfBounds, spider.rank1(0));
+    try testing.expectEqual(count, try spider.rank1(buf_size * 8));
+    try testing.expectError(Spider.Error.OutOfBounds, spider.rank1(0));
 }
 
 test "spiderSelect1" {
@@ -485,14 +487,14 @@ test "spiderSelect1" {
     var r = std.Random.DefaultPrng.init(seed);
     var random = r.random();
 
-    var data = try std.testing.allocator.alloc(u8, buf_size);
-    defer std.testing.allocator.free(data);
+    var data = try testing.allocator.alloc(u8, buf_size);
+    defer testing.allocator.free(data);
 
     data.len = buf_size;
     random.bytes(data);
 
-    var spider = try Spider.init(std.testing.allocator, data, buf_size * 8);
-    defer spider.deinit(std.testing.allocator);
+    var spider = try Spider.init(testing.allocator, data, buf_size * 8);
+    defer spider.deinit(testing.allocator);
 
     var count: u64 = 0;
 
@@ -503,13 +505,13 @@ test "spiderSelect1" {
         const expectation = i * 8 + pos;
 
         const select = try spider.select1(count + n);
-        try std.testing.expectEqual(expectation, select);
+        try testing.expectEqual(expectation, select);
 
         count += @popCount(data[i]);
     }
 
-    try std.testing.expectError(Spider.Error.OutOfBounds, spider.select1(0));
-    try std.testing.expectEqual(2, spider.select1(1));
+    try testing.expectError(Spider.Error.OutOfBounds, spider.select1(0));
+    try testing.expectEqual(2, spider.select1(1));
 }
 
 test "spiderSelect0" {
@@ -519,14 +521,14 @@ test "spiderSelect0" {
     var r = std.Random.DefaultPrng.init(seed);
     var random = r.random();
 
-    var data = try std.testing.allocator.alloc(u8, buf_size);
-    defer std.testing.allocator.free(data);
+    var data = try testing.allocator.alloc(u8, buf_size);
+    defer testing.allocator.free(data);
 
     data.len = buf_size;
     random.bytes(data);
 
-    var spider = try Spider.init(std.testing.allocator, data, buf_size * 8);
-    defer spider.deinit(std.testing.allocator);
+    var spider = try Spider.init(testing.allocator, data, buf_size * 8);
+    defer spider.deinit(testing.allocator);
 
     var count: u64 = 0;
 
@@ -538,11 +540,11 @@ test "spiderSelect0" {
         const expectation = i * 8 + pos;
 
         const select = try spider.select0(count + n);
-        try std.testing.expectEqual(expectation, select);
+        try testing.expectEqual(expectation, select);
 
         count += @popCount(byte);
     }
 
-    try std.testing.expectError(Spider.Error.OutOfBounds, spider.select1(0));
-    try std.testing.expectEqual(2, spider.select1(1));
+    try testing.expectError(Spider.Error.OutOfBounds, spider.select1(0));
+    try testing.expectEqual(2, spider.select1(1));
 }
