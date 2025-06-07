@@ -1,8 +1,11 @@
 const std = @import("std");
 const bit = @import("bit.zig");
 const ef = @import("ef.zig");
+const util = @import("util.zig");
 const iface = @import("interface.zig");
 const iterator = @import("iterator.zig");
+
+const toF64 = util.toF64;
 
 fn IMapper(Hash: type) type {
     return struct {
@@ -94,7 +97,7 @@ pub fn OptimalMapper(Hash: type) type {
 }
 
 fn DefaultHasher(comptime Key: type) type {
-    if (!isStringSlice(Key)) @compileError("Unsupported string type " ++ @typeName(Key));
+    if (!util.isStringSlice(Key)) @compileError("Unsupported string type " ++ @typeName(Key));
 
     return struct {
         pub fn hashKey(_: @This(), seed: u64, key: Key) u64 {
@@ -320,7 +323,7 @@ pub fn GenericPTHash(
                 }
 
                 var iter_fs = iterator.SliceIterator(u64).init(pilots);
-                enc_free_slots = try ef.EliasFano.init(allocator, free_slots[free_slots.len - 1], @TypeOf(&iter_fs), &iter_fs);
+                enc_free_slots = try ef.EliasFano.init(allocator, free_slots[free_slots.len - 1], @TypeOf(&iter_pilots), &iter_fs);
                 errdefer enc_free_slots.deinit(allocator);
             }
 
@@ -419,54 +422,7 @@ pub fn PTHash(
     };
 }
 
-fn toF64(it: anytype) f64 {
-    return switch (@typeInfo(@TypeOf(it))) {
-        .comptime_int, .int => @as(f64, @floatFromInt(it)),
-        else => @compileError("as_f64 requires an unsigned integer, found " ++ @typeName(@TypeOf(it))),
-    };
-}
-
-fn randomString(allocator: std.mem.Allocator, len: usize, rng: std.Random) ![]u8 {
-    const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    const buffer = try allocator.alloc(u8, len);
-    for (buffer) |*ch| {
-        const idx = rng.uintLessThan(usize, charset.len);
-        ch.* = charset[idx];
-    }
-    return buffer;
-}
-
-fn isCharType(comptime T: type) bool {
-    return T == u8 or T == u16 or T == u32 or T == u21;
-}
-
-const RandomStrings = struct {
-    strings: [][]u8,
-    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-        for (self.strings) |s| allocator.free(s);
-        allocator.free(self.strings);
-        self.* = undefined;
-    }
-};
-
-fn randomStrings(allocator: std.mem.Allocator, n: usize, str_size: usize, rng: std.Random) !RandomStrings {
-    var strings = try allocator.alloc([]u8, n);
-    for (0..n) |i| {
-        strings[i] = try randomString(allocator, str_size, rng);
-    }
-    return .{ .strings = strings };
-}
-
-fn isStringSlice(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .pointer => |ptr| switch (ptr.size) {
-            .slice => isCharType(ptr.child),
-            else => false,
-        },
-        .array => |arr| isCharType(arr.child),
-        else => false,
-    };
-}
+const testing = std.testing;
 
 test "PTHash" {
     std.debug.print("\n----PTHash----\n\n", .{});
@@ -476,7 +432,7 @@ test "PTHash" {
     const random = r.random();
 
     const n = 50000;
-    var rs = try randomStrings(allocator, n, 30, random);
+    var rs = try util.randomStrings(allocator, n, 30, random);
     defer rs.deinit(allocator);
     const data = rs.strings;
 
@@ -495,16 +451,16 @@ test "PTHash" {
 
     std.debug.print("Build: ns per key: {d:.2}\n\n", .{toF64(diff) / toF64(data.len)});
 
-    var seen = try std.testing.allocator.alloc(bool, res.table_size);
-    defer std.testing.allocator.free(seen);
+    var seen = try testing.allocator.alloc(bool, res.table_size);
+    defer testing.allocator.free(seen);
     @memset(seen, false);
 
     var dataSize: u64 = 0;
     for (data) |key| {
         dataSize += key.len;
         const index = try res.get(key);
-        try std.testing.expect(index < seen.len);
-        try std.testing.expect(!seen[index]);
+        try testing.expect(index < seen.len);
+        try testing.expect(!seen[index]);
         seen[index] = true;
     }
 
@@ -512,13 +468,16 @@ test "PTHash" {
     for (seen) |b| {
         if (b) count += 1;
     }
-    try std.testing.expect(count == n);
+    try testing.expect(count == n);
 
-    try std.testing.expect(count == n);
+    const size = util.calculateRuntimeSize(@TypeOf(res), res);
 
-    const size = res.pilots.byteSize() + if (res.free_slots) |slot| slot.byteSize() else 0;
+    var hb = util.HumanBytes{};
 
-    std.debug.print("Bits per key: {d:.4}\nByte size:   {}\nTable size:  {}\nNum keys:    {}\nNum buckets: {}\n", .{
-        (toF64(size) * 8.0) / toF64(n), size, res.table_size, n, res.config.mapper.numBuckets(),
-    });
+    std.debug.print(
+        "Bits per key: {d:.4}\nPTHash size:  {s}\nTable size:   {}\nNum keys:     {}\nNum buckets:  {}\n",
+        .{
+            (toF64(size) * 8.0) / toF64(n), hb.fmt(size), res.table_size, n, res.config.mapper.numBuckets(),
+        },
+    );
 }
