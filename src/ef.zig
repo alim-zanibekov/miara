@@ -92,14 +92,16 @@ pub fn GenericEliasFano(T: type) type {
     };
 }
 
+const testing = std.testing;
+
 test "eliasFanoCodec" {
     const n = 500;
     const seed = 0x4C27A681B1;
     var r = std.Random.DefaultPrng.init(seed);
     var random = r.random();
 
-    var data = try std.testing.allocator.alloc(u64, n);
-    defer std.testing.allocator.free(data);
+    var data = try testing.allocator.alloc(u64, n);
+    defer testing.allocator.free(data);
 
     data[0] = random.uintLessThan(u64, ~@as(u32, 0) / n);
     for (1..n) |i| {
@@ -107,15 +109,15 @@ test "eliasFanoCodec" {
     }
 
     var iter = iterator.SliceIterator(u64).init(data);
-    var ef = try EliasFano.init(std.testing.allocator, data[data.len - 1], @TypeOf(&iter), &iter);
-    defer ef.deinit(std.testing.allocator);
+    var ef = try EliasFano.init(testing.allocator, data[data.len - 1], @TypeOf(&iter), &iter);
+    defer ef.deinit(testing.allocator);
 
     for (data, 0..) |it, i| {
-        try std.testing.expectEqual(it, ef.get(i));
+        try testing.expectEqual(it, ef.get(i));
     }
 
     for (0..n - 2) |i| {
         const goq = try ef.getNextGEQ(data[i]);
-        try std.testing.expect(data[i + 1] == goq or data[i] == goq);
+        try testing.expect(data[i + 1] == goq or data[i] == goq);
     }
 }
