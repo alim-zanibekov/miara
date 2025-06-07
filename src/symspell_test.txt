@@ -1,0 +1,116 @@
+# Test data file for SymSpell
+# Dict: 20 words, max edit distance 2
+
+@DICT
+hello 42949
+world 30000
+test 25000
+word 20000
+find 18000
+spell 16000
+check 14000
+correct 12000
+error 10000
+distance 9000
+fuzzy 8000
+search 7000
+match 6000
+similar 5000
+close 4000
+near 3000
+edit 2500
+change 2000
+film 1500
+good 1000
+@DICT_END
+
+@SEARCH
+# substitution (edit distance 1)
+hallo -> hello
+wotld -> world
+tast -> test
+werd -> word
+fint -> find
+
+# deletion (edit distance 1)
+helo -> hello
+worl -> world
+tes -> test
+wor -> word
+fin -> find
+
+# insertion (edit distance 1)
+helllo -> hello
+worlld -> world
+tesst -> test
+worrd -> word
+finnd -> find
+
+# transposition (edit distance 1)
+ehllo -> hello
+wrold -> world
+etst -> test
+owrd -> word
+ifnd -> find
+
+# any (edit distance 2)
+halo -> hello
+wold -> world
+tet -> test
+wrd -> word
+fid -> find
+
+# any (edit distance 2)
+helo -> hello
+helol -> hello
+hallo -> hello
+wrold -> world
+testt -> test
+tset -> test
+wrod -> word
+werd -> word
+fint -> find
+fidn -> find
+
+# any (edit distance 1)
+spel -> spell
+chek -> check
+corect -> correct
+eror -> error
+distanc -> distance
+
+# edit distance > 2
+xyz ->          #
+qwerty ->       #
+hxxxlo ->       #
+abc ->          #
+testing ->      #
+helicopter ->   #
+computer ->     #
+programming ->  #
+symspell ->     #
+algorithm ->    #
+
+# boundary cases
+h ->            #
+hel -> hello    #
+wo -> word      #
+t ->            #
+fi -> find      #
+
+# unicode
+héllo -> hello  #
+tëst -> test    #
+wörld -> world  #
+naïve ->        #
+café ->         #
+@SEARCH_END
+
+# splitting concatenated words
+@SEGMENTATION
+helloworld -> hello|world
+testword -> test|word
+spelcheck -> spell|check
+goodfind -> good|find
+editdistance -> edit|distance
+@SEGMENTATION_END
