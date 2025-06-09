@@ -19,10 +19,6 @@ pub fn GenericEliasFano(T: type) type {
         low_n: u16,
         len: usize,
 
-        pub fn byteSize(self: *const Self) u64 {
-            return self.higher_bits.byteSize() + self.lower_bits.byteSize() + @sizeOf(Self);
-        }
-
         pub fn init(allocator: std.mem.Allocator, universe: T, TIter: type, iter: TIter) !Self {
             iface.checkImplementsGuard(iterator.Iterator(T), iface.UnPtr(TIter));
 

@@ -18,10 +18,6 @@ pub fn GenericBitArray(comptime T: type) type {
         bit_len: TSize,
         capacity: TSize,
 
-        pub fn byteSize(self: *const Self) u64 {
-            return self.data.capacity * @sizeOf(T) + @sizeOf(TSize) * 2;
-        }
-
         pub fn init() Self {
             return Self{
                 .data = std.ArrayListUnmanaged(T){},

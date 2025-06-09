@@ -25,10 +25,6 @@ pub const Spider = struct {
     sd1: SelectData,
     sd0: SelectData,
 
-    pub fn byteSize(self: *const Self) u64 {
-        return self.hl_rank.len * @sizeOf(u64) + self.bit_array.len + self.sd1.byteSize() + self.sd0.byteSize();
-    }
-
     pub fn init(allocator: std.mem.Allocator, bits: []const u8, num_bits: u64) Error!Self {
         if (num_bits == 0) return Error.OutOfBounds;
         if ((num_bits - 1) >> 3 + 1 > bits.len) return Error.OutOfBounds;
