@@ -148,9 +148,7 @@ fn calculateRuntimeSizeImpl(comptime T: type, value: T) usize {
         .@"struct" => |info| {
             total_size = @sizeOf(T);
             inline for (info.fields) |field| {
-                if (comptime isStaticType(field.type)) {
-                    total_size += @sizeOf(field.type);
-                } else {
+                if (!(comptime isStaticType(field.type))) {
                     total_size += calculateRuntimeSizeImpl(field.type, @field(value, field.name)) - @sizeOf(field.type);
                 }
             }
@@ -233,6 +231,7 @@ test "struct with nested slice" {
 
     const Outer = struct {
         inner: Inner,
+        value: u32,
         tag: []const u8,
     };
 
@@ -240,6 +239,7 @@ test "struct with nested slice" {
     const outer = Outer{
         .inner = Inner{ .values = &arr },
         .tag = "test",
+        .value = 666,
     };
 
     const size = calculateRuntimeSize(Outer, outer);
