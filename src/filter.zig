@@ -6,6 +6,7 @@ pub fn hashFnArray(comptime hashes: anytype) []@TypeOf(hashes[0]) {
     return @constCast(&hashes);
 }
 
+/// Creates a Bloom filter type parameterized by a list of hash functions
 pub fn BloomFilter(
     comptime HashFunctions: []*const fn (*anyopaque, []const u8) u64,
 ) type {
@@ -17,6 +18,7 @@ pub fn BloomFilter(
         hash_fn_cnt: usize,
         owns_bit_array: bool,
 
+        /// Initializes a Bloom filter with `bit_count` bits and `hash_fn_cnt` hash functions (up to HashFunctions.len)
         pub fn init(allocator: std.mem.Allocator, bit_count: usize, hash_fn_cnt: usize) !Self {
             if (bit_count == 0) return error.InvlidBitCount;
             if (hash_fn_cnt > HashFunctions.len) return error.InvalidHashFnCount;
@@ -32,6 +34,7 @@ pub fn BloomFilter(
             };
         }
 
+        /// Initializes Bloom filter without internal allocations
         pub fn initSlice(bit_array: []u8, bit_count: usize, hash_fn_cnt: usize) !Self {
             if (bit_count == 0) return error.InvlidBitCount;
             if (hash_fn_cnt > HashFunctions.len) return error.InvalidHashFnCount;
@@ -59,6 +62,7 @@ pub fn BloomFilter(
             return (self.bit_array[i / 8] & (@as(u8, 1) << @intCast(i % 8))) != 0;
         }
 
+        /// Inserts a key into the Bloom filter
         pub fn put(self: *Self, key: []const u8) void {
             for (HashFunctions[0..self.hash_fn_cnt]) |hashFn| {
                 const h = hashFn(@ptrCast(self), key) % self.bit_count;
@@ -66,6 +70,7 @@ pub fn BloomFilter(
             }
         }
 
+        /// Returns true if the key is possibly in the Bloom filter
         pub fn contains(self: *Self, key: []const u8) bool {
             for (HashFunctions[0..self.hash_fn_cnt]) |hashFn| {
                 const h = hashFn(@ptrCast(self), key) % self.bit_count;
@@ -76,6 +81,7 @@ pub fn BloomFilter(
     };
 }
 
+/// LRU filter
 pub const LRUFilter = struct {
     const Self = @This();
     const Node = std.DoublyLinkedList(void).Node;
@@ -116,6 +122,7 @@ pub const LRUFilter = struct {
         };
     }
 
+    /// Clears all entries while keeping capacity
     pub fn clear(self: *Self) void {
         self.hash_map.clearRetainingCapacity();
         self.free_nodes.concatByMoving(&self.queue);
@@ -140,6 +147,7 @@ pub const LRUFilter = struct {
         }
     }
 
+    /// Inserts key, evicts least recently used if full
     pub fn put(self: *Self, key: []const u8) void {
         if (self.hash_map.get(key)) |k| {
             self.moveToFront(k);
@@ -159,6 +167,7 @@ pub const LRUFilter = struct {
         }
     }
 
+    /// Checks if key is present (and marks as recently used)
     pub fn contains(self: *Self, key: []const u8) bool {
         if (self.hash_map.get(key)) |k| {
             self.moveToFront(k);
@@ -168,23 +177,25 @@ pub const LRUFilter = struct {
     }
 };
 
-// https://stackoverflow.com/questions/658439/how-many-hash-functions-does-my-bloom-filter-need
-// The number of bits needed for given amount of keys and false positive rate
+/// Estimates bit size needed for Bloom filter with `n_keys` and false positive rate
 pub fn bloomBitSize(n_keys: usize, fp_rate: f64) u64 {
+    // https://stackoverflow.com/questions/658439/how-many-hash-functions-does-my-bloom-filter-need
+    // The number of bits needed for given amount of keys and false positive rate
     return @max(1, @as(u64, @intFromFloat(-toF64(n_keys) * @log(fp_rate) / (std.math.ln2 * std.math.ln2))));
 }
 
+/// Estimates byte size needed for Bloom filter with `n_keys` and false positive rate
 pub fn bloomByteSize(n_keys: usize, fp_rate: f64) u64 {
     const bit_count = bloomBitSize(n_keys, fp_rate);
     return std.math.divCeil(u64, bit_count, 8) catch unreachable;
 }
 
-// The number of hash functions we should use
+/// Calculates optimal number of hash functions for Bloom filter
 pub fn bloomNHashFn(n_keys: usize, fp_rate: f64) u64 {
     return @max(1, @as(u64, @intFromFloat(toF64(bloomBitSize(n_keys, fp_rate)) / toF64(n_keys) * std.math.ln2)));
 }
 
-pub const Hashes = struct {
+pub const Hashes6 = struct {
     fn hash1(_: *anyopaque, key: []const u8) u64 {
         return std.hash.Wyhash.hash(0x1baf584fef93eecf, key);
     }
@@ -206,9 +217,10 @@ pub const Hashes = struct {
 };
 
 const hashes6 = [_]*const fn (*anyopaque, []const u8) u64{
-    Hashes.hash1, Hashes.hash2, Hashes.hash3, Hashes.hash4, Hashes.hash5, Hashes.hash6,
+    Hashes6.hash1, Hashes6.hash2, Hashes6.hash3, Hashes6.hash4, Hashes6.hash5, Hashes6.hash6,
 };
 
+/// A Bloom filter with 6 built-in hash functions
 pub const BloomFilter6 = BloomFilter(hashFnArray(hashes6));
 
 test "BloomFilter" {

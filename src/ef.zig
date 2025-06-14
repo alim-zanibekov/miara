@@ -3,9 +3,12 @@ const s = @import("spider.zig");
 const bit = @import("bit.zig");
 const iterator = @import("iterator.zig");
 const iface = @import("interface.zig");
+const util = @import("util.zig");
 
 pub const EliasFano = GenericEliasFano(u64);
 
+/// Elias–Fano representation for monotonically increasing sequences
+/// `T` must be an unsigned integer type
 pub fn GenericEliasFano(T: type) type {
     if (@typeInfo(T) != .int or @typeInfo(T).int.signedness != .unsigned)
         @compileError("BitArrayT requires an unsigned integer as backing type, found " ++ @typeName(T));
@@ -19,14 +22,16 @@ pub fn GenericEliasFano(T: type) type {
         low_n: u16,
         len: usize,
 
+        /// Initializes Elias–Fano structure with values from `iter`
+        /// `universe` is the maximum possible value in the sequence (must be greater than or equal to the last element in the sequence)
+        /// `TIter` must implement `Iterator(T)` see `/iterator.zig`
         pub fn init(allocator: std.mem.Allocator, universe: T, TIter: type, iter: TIter) !Self {
             iface.checkImplementsGuard(iterator.Iterator(T), iface.UnPtr(TIter));
 
             const m = universe;
             const n = iter.size();
-
-            const log_m = std.math.log2_int_ceil(T, m);
-            const log_n = std.math.log2_int_ceil(usize, n);
+            const log_m = util.log2IntCeilOrZero(T, m);
+            const log_n = util.log2IntCeilOrZero(usize, n);
 
             const low_n = if (log_m > log_n) log_m - log_n else 0;
             const lb_n = n * low_n;
@@ -68,14 +73,14 @@ pub fn GenericEliasFano(T: type) type {
             self.lower_bits.deinit(allocator);
         }
 
-        // Get i-th element
+        /// Returns the i-th element in array
         pub fn get(self: *const Self, i: usize) !T {
             const h_bits = try self.higher_bits.select1(i + 1) - i;
-            const l_bits = if (self.low_n > 0) try self.lower_bits.getRt(T, @intCast(self.low_n), self.low_n * i) else 0;
+            const l_bits = if (self.low_n > 0) try self.lower_bits.getN(T, @intCast(self.low_n), self.low_n * i) else 0;
             return (h_bits << @intCast(self.low_n)) | l_bits;
         }
 
-        // Get next greater or equal than `num`
+        /// Finds the next value greater than or equal to `num`
         pub fn getNextGEQ(self: *const Self, num: T) !T {
             const i = num >> @intCast(self.low_n);
             var pos = if (i > 0) try self.higher_bits.select0(i) - i else 0;

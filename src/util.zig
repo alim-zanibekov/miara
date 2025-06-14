@@ -1,11 +1,17 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Converts any integer to f64
 pub fn toF64(it: anytype) f64 {
     return switch (@typeInfo(@TypeOf(it))) {
         .comptime_int, .int => @as(f64, @floatFromInt(it)),
         else => @compileError("as_f64 requires an unsigned integer, found " ++ @typeName(@TypeOf(it))),
     };
+}
+
+pub fn log2IntCeilOrZero(comptime T: type, x: T) std.math.Log2IntCeil(T) {
+    if (x == 0) return 0;
+    return std.math.log2_int_ceil(T, x);
 }
 
 pub fn randomString(allocator: std.mem.Allocator, len: usize, rng: std.Random) ![]u8 {
@@ -50,6 +56,8 @@ pub fn isCharType(comptime T: type) bool {
     return T == u8 or T == u16 or T == u32 or T == u21;
 }
 
+/// Converts a byte count to a human-readable string, backed by comptime sized buffers to avoid dealing with allocators
+/// Only for tests (builtin.is_test == true)
 pub const HumanBytes = struct {
     const bufferCount = 32;
 
@@ -84,6 +92,7 @@ pub const HumanBytes = struct {
     }
 };
 
+/// Returns true if type T is composed entirely of static memory (no heap data)
 pub fn isStaticType(comptime T: type) bool {
     switch (@typeInfo(T)) {
         .int, .float, .bool, .@"enum", .error_set, .void => return true,
@@ -108,6 +117,7 @@ pub fn isStaticType(comptime T: type) bool {
     }
 }
 
+/// Returns the runtime memory size (in bytes) of a value, accounting for nested slices/strings
 pub fn calculateRuntimeSize(comptime T: type, value: T) usize {
     const hint = comptime isStaticType(T);
     switch (hint) {

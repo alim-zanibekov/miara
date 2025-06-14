@@ -5,35 +5,10 @@ const util = @import("util.zig");
 const iterator = @import("iterator.zig");
 const ef = @import("ef.zig");
 
-const Utf8 = struct {};
+/// UTF-8 string type indicator
+pub const Utf8 = struct {};
 
-fn stringBackingTypeGuard(comptime T: type) void {
-    if (!util.isCharType(T)) @compileError("Unsupported string backing type " ++ @typeName(T));
-}
-
-fn isStringType(comptime T: type) bool {
-    if (T == Utf8) return true;
-
-    return switch (@typeInfo(T)) {
-        .pointer => |ptr| switch (ptr.size) {
-            .slice => ptr.child == u8 or ptr.child == u16 or ptr.child == u32 or ptr.child == u21,
-            else => false,
-        },
-        .array => |arr| arr.child == u8 or arr.child == u16 or arr.child == u32 or arr.child == u21,
-        else => false,
-    };
-}
-
-fn StringElementType(comptime T: type) type {
-    if (T == Utf8) return u8;
-
-    return switch (@typeInfo(T)) {
-        .pointer => |ptr| ptr.child,
-        .array => |arr| arr.child,
-        else => unreachable,
-    };
-}
-
+/// SymSpell - wrapper over GenericSymSpell, uses `levenshteinDistance` as a distance function
 pub fn SymSpell(
     comptime Word: type,
     comptime Ctx: type,
@@ -48,14 +23,15 @@ pub fn SymSpell(
             return levenshteinDistance(EdT, u32, buffer, word1, word2);
         }
 
-        inline fn strLen(_: Ctx, word: []const T) usize {
-            return word.len;
+        inline fn strLen(_: Ctx, word: []const T) ?usize {
+            return if (Word == Utf8) std.unicode.utf8CountCodepoints(word) catch null else word.len;
         }
     };
 
     return GenericSymSpell(Word, Ctx, Func.editDistanceBuffer, Func.strLen, wordMaxDistance, true);
 }
 
+/// SymSpellDL - wrapper over GenericSymSpell, uses `damerauLevenshteinDistance` as a distance function
 pub fn SymSpellDL(
     comptime Word: type,
     comptime Ctx: type,
@@ -70,26 +46,32 @@ pub fn SymSpellDL(
             return damerauLevenshteinDistance(EdT, u32, buffer, word1, word2);
         }
 
-        inline fn strLen(_: Ctx, word: []const T) usize {
-            return word.len;
+        inline fn strLen(_: Ctx, word: []const T) ?usize {
+            return if (Word == Utf8) std.unicode.utf8CountCodepoints(word) catch null else word.len;
         }
     };
 
     return GenericSymSpell(Word, Ctx, Func.editDistanceBuffer, Func.strLen, wordMaxDistance, true);
 }
 
+/// SymSpell provides a distance function based fuzzy matcher over a dictionary
+/// `Word` - slice type of u8, u16, u21, u32 or `Utf8`,
+/// `Ctx` - context type for callbacks
+/// `wordMaxDistance` - function to get max delete distance for a word
+/// `strLen` - function to get string length
+/// `compressEdits` - whether to compress the edits index using Elias-Fano compression
 pub fn GenericSymSpell(
     comptime Word: type,
     comptime Ctx: type,
-    comptime editDistanceBuffer: bk: {
+    comptime editDistanceBuffer: edb: {
         const T = StringElementType(Word);
         if (Word == Utf8) {
-            break :bk fn (ctx: Ctx, buffer: []u32, word1: []const u32, word2: []const u32) callconv(.@"inline") u32;
+            break :edb fn (ctx: Ctx, buffer: []u32, word1: []const u32, word2: []const u32) callconv(.@"inline") u32;
         } else {
-            break :bk fn (ctx: Ctx, buffer: []u32, word1: []const T, word2: []const T) callconv(.@"inline") u32;
+            break :edb fn (ctx: Ctx, buffer: []u32, word1: []const T, word2: []const T) callconv(.@"inline") u32;
         }
     },
-    comptime strLen: fn (ctx: Ctx, str: []const StringElementType(Word)) callconv(.@"inline") usize,
+    comptime strLen: fn (ctx: Ctx, str: []const StringElementType(Word)) callconv(.@"inline") ?usize,
     comptime wordMaxDistance: fn (ctx: Ctx, str: []const StringElementType(Word)) usize,
     comptime compressEdits: bool,
 ) type {
@@ -121,7 +103,7 @@ pub fn GenericSymSpell(
         }
     };
 
-    const PTHash = pthash.PTHash([]const T, pthash.OptimalMapper(u64), SortedEditsIterator);
+    const PTHash = pthash.PTHash([]const T, pthash.OptimalMapper(u64));
     const EliasFano = ef.GenericEliasFano(usize);
 
     return struct {
@@ -208,7 +190,7 @@ pub fn GenericSymSpell(
             dict_stats: ?DictStats = null,
         };
 
-        dict: []Token,
+        dict: []const Token,
         dict_stats: DictStats,
         pthash: PTHash.Type,
         edits_index_ef: if (compressEdits) EliasFano else void,
@@ -232,7 +214,9 @@ pub fn GenericSymSpell(
             self.* = undefined;
         }
 
-        pub fn getDictStats(ctx: Ctx, dict: []Token) DictStats {
+        /// Collects statistics from the input dictionary.
+        /// These stats are used to size buffers, etc
+        pub fn getDictStats(ctx: Ctx, dict: []const Token) !DictStats {
             var edits_layer_num_max: usize = 1;
             var edits_num_max: usize = 1;
             var word_max_size: usize = 1;
@@ -243,7 +227,7 @@ pub fn GenericSymSpell(
 
             for (dict) |it| {
                 word_max_size = @max(word_max_size, it.word.len);
-                const len = strLen(ctx, it.word);
+                const len = strLen(ctx, it.word) orelse return error.GetWordLengthError;
                 word_max_len = @max(word_max_len, len);
                 const distance = wordMaxDistance(ctx, it.word);
                 max_distance = @max(max_distance, distance);
@@ -265,8 +249,10 @@ pub fn GenericSymSpell(
             };
         }
 
-        pub fn initBloom(allocator: std.mem.Allocator, dict: []Token, ctx: Ctx, opts: BloomOptions) !Self {
-            const stats = if (opts.dict_stats) |it| it else getDictStats(ctx, dict);
+        /// Constructs SymSpell using a Bloom filter for deletes deduplication
+        /// `BloomOptions`.`fp_rate` - false positive rate for Bloom filter
+        pub fn initBloom(allocator: std.mem.Allocator, dict: []const Token, ctx: Ctx, opts: BloomOptions) !Self {
+            const stats = if (opts.dict_stats) |it| it else try getDictStats(ctx, dict);
 
             const byte_count: usize = @intCast(filter.bloomByteSize(stats.edits_num_max, opts.fp_rate));
             var deduper = try BloomDeduper(T).init(allocator, byte_count, opts.fp_rate);
@@ -275,7 +261,9 @@ pub fn GenericSymSpell(
             return init(allocator, dict, ctx, stats, @TypeOf(&deduper), &deduper);
         }
 
-        pub fn initLRU(allocator: std.mem.Allocator, dict: []Token, ctx: Ctx, opts: LRUOptions) !Self {
+        /// Constructs SymSpell using an LRU cache for edit deduplication
+        /// `LRUOptions`.`capacity` - LRU cache capacity
+        pub fn initLRU(allocator: std.mem.Allocator, dict: []const Token, ctx: Ctx, opts: LRUOptions) !Self {
             const stats = if (opts.dict_stats) |it| it else getDictStats(ctx, dict);
 
             const deduper = try LRUDeduper(T).init(allocator, opts.capacity);
@@ -284,9 +272,10 @@ pub fn GenericSymSpell(
             return init(allocator, dict, ctx, stats, @TypeOf(&deduper), &deduper);
         }
 
+        /// Builds SymSpell dictionary using the provided deduper
         pub fn init(
             main_allocator: std.mem.Allocator,
-            dict: []Token,
+            dict: []const Token,
             ctx: Ctx,
             dict_stats: DictStats,
             Deduper: type,
@@ -324,7 +313,7 @@ pub fn GenericSymSpell(
             }
 
             var iter = SortedEditsIterator{ .array = word_edits.items, .len = unique };
-            var ph = try PTHash.build(main_allocator, &iter, PTHash.buildConfig(iter.size(), .{
+            var ph = try PTHash.build(main_allocator, @TypeOf(&iter), &iter, PTHash.buildConfig(iter.size(), .{
                 .alpha = 0.97,
                 .minimal = true,
             }));
@@ -450,6 +439,7 @@ pub fn GenericSymSpell(
             }
         }
 
+        /// Reusable search instance tied to a specific SymSpell dictionary
         pub fn Searcher(EditsDeduper: type) type {
             return struct {
                 sym_spell: *const Self,
@@ -464,6 +454,7 @@ pub fn GenericSymSpell(
                 ed_buffer_1: if (Word == Utf8) []u32 else void,
                 ed_buffer_2: if (Word == Utf8) []u32 else void,
 
+                /// Allocates the search buffers and internal state
                 pub fn init(sym_spell: *const Self, allocator: std.mem.Allocator) !@This() {
                     const generator = try EditsGenerator([]const T, EditsDeduper)
                         .init(
@@ -500,8 +491,9 @@ pub fn GenericSymSpell(
                     self.generator.deinit(allocator);
                 }
 
+                /// Initializes the search with a given input word
                 pub fn load(self: *@This(), word: []const T, max_distance: usize, edits_deduper: EditsDeduper) !void {
-                    const len = strLen(self.sym_spell.ctx, word);
+                    const len = strLen(self.sym_spell.ctx, word) orelse return error.GetWordLengthError;
                     if (len > self.sym_spell.dict_stats.word_max_len + self.sym_spell.dict_stats.max_distance) {
                         // no chances to find something useful
                         self.generator.reset();
@@ -526,6 +518,9 @@ pub fn GenericSymSpell(
                     }
                 }
 
+                /// Advances the iterator and attempts to find the next closest matching word in the dictionary
+                /// Returns true if a new best hit was found
+                /// `Searcher`.`hit` is valid until the next call
                 pub fn next(self: *@This()) !bool {
                     var delete_distance: usize = 0;
                     while (self.generator.next()) {
@@ -564,6 +559,7 @@ pub fn GenericSymSpell(
                     return false;
                 }
 
+                /// Returns the best match for a term
                 pub fn top(self: *@This()) !?Hit {
                     var best_hit = Hit{};
 
@@ -586,7 +582,8 @@ pub fn GenericSymSpell(
                         for ((d_ref + 1)..(d_ref + 1 + size)) |i| {
                             const word_i = self.sym_spell.edits_values[i];
                             const it = self.sym_spell.dict[self.sym_spell.edits_values[i]];
-                            if (@abs(@as(i64, @intCast(strLen(self.sym_spell.ctx, it.word))) - @as(i64, @intCast(self.len))) > self.max_distance) {
+                            const str_len = strLen(self.sym_spell.ctx, it.word) orelse return error.GetWordLengthError;
+                            if (@abs(@as(i64, @intCast(str_len)) - @as(i64, @intCast(self.len))) > self.max_distance) {
                                 continue;
                             }
 
@@ -651,8 +648,9 @@ pub fn GenericSymSpell(
             return null;
         }
 
+        /// Attempts to split and correct a possibly misspelled phrase
         pub fn wordSegmentation(self: *const Self, allocator: std.mem.Allocator, input: []const T) !?Suggestion {
-            const input_len = strLen(self.ctx, input);
+            const input_len = strLen(self.ctx, input) orelse return error.GetWordLengthError;
             const word_max_size = self.dict_stats.word_max_size + self.dict_stats.max_distance * 4;
             const word_max_len = self.dict_stats.word_max_len + self.dict_stats.max_distance;
             const suggestions_count = @min(word_max_len, input_len);
@@ -775,7 +773,7 @@ pub fn GenericSymSpell(
 
                             if (d == c) {
                                 const start_1 = suggestions[d].segmented.len;
-                                const start_2 = suggestions[d].segmented.len;
+                                const start_2 = suggestions[d].corrected.len;
                                 try suggestions[d].expand(allocator, n_1, n_2, true);
                                 memcpuMultiple(T, suggestions[d].segmented[start_1..], &.{ space, part });
                                 memcpuMultiple(T, suggestions[d].corrected[start_2..], &.{ space, top_result });
@@ -816,7 +814,8 @@ pub fn GenericSymSpell(
     };
 }
 
-fn NoopDeduper(comptime T: type) type {
+/// Does nothing, always allows all edits
+pub fn NoopDeduper(comptime T: type) type {
     stringBackingTypeGuard(T);
 
     return struct {
@@ -835,7 +834,8 @@ fn NoopDeduper(comptime T: type) type {
     };
 }
 
-fn HashSetDeduper(comptime T: type) type {
+/// Deduper using a hash set to track seen edits
+pub fn HashSetDeduper(comptime T: type) type {
     stringBackingTypeGuard(T);
 
     return struct {
@@ -884,7 +884,8 @@ fn HashSetDeduper(comptime T: type) type {
     };
 }
 
-fn BloomDeduper(comptime T: type) type {
+/// Deduper using a Bloom filter to track seen edits
+pub fn BloomDeduper(comptime T: type) type {
     stringBackingTypeGuard(T);
 
     return struct {
@@ -933,7 +934,8 @@ fn BloomDeduper(comptime T: type) type {
     };
 }
 
-fn LRUDeduper(comptime T: type) type {
+/// Deduper using an LRU cache with fixed capacity
+pub fn LRUDeduper(comptime T: type) type {
     stringBackingTypeGuard(T);
 
     return struct {
@@ -968,7 +970,9 @@ fn LRUDeduper(comptime T: type) type {
     };
 }
 
-fn EditsGenerator(comptime TStr: type, TDeduper: type) type {
+/// Produces deletion-based edits of a word
+/// Uses a deduper to avoid repeating the same edit
+pub fn EditsGenerator(comptime TStr: type, TDeduper: type) type {
     comptime if (!isStringType(TStr)) @compileError("Unsupported string type " ++ @typeName(TStr));
 
     const T = StringElementType(TStr);
@@ -1100,6 +1104,7 @@ fn EditsGenerator(comptime TStr: type, TDeduper: type) type {
     };
 }
 
+/// Calculates Levenshtein distance between two strings
 pub fn levenshteinDistance(TStr: type, TBuf: type, dp: []TBuf, a: []const TStr, b: []const TStr) TBuf {
     const m = a.len;
     const n = b.len;
@@ -1133,6 +1138,7 @@ pub fn levenshteinDistance(TStr: type, TBuf: type, dp: []TBuf, a: []const TStr, 
     return dp[m * stride + n];
 }
 
+/// Calculates Damerau-Levenshtein distance between two strings (Levenshtein + adjacent swaps)
 pub fn damerauLevenshteinDistance(TStr: type, TBuf: type, dp: []TBuf, a: []const TStr, b: []const TStr) TBuf {
     const m = a.len;
     const n = b.len;
@@ -1170,16 +1176,37 @@ pub fn damerauLevenshteinDistance(TStr: type, TBuf: type, dp: []TBuf, a: []const
     return dp[m * stride + n];
 }
 
+/// Levenshtein distance with buffer allocation
 pub fn levenshteinDistanceAlloc(TStr: type, TBuf: type, allocator: std.mem.Allocator, a: []const TStr, b: []const TStr) !TBuf {
     const dp = try allocator.alloc(TBuf, (a.len + 1) * (b.len + 1));
     defer allocator.free(dp);
     return levenshteinDistance(TStr, TBuf, dp, a, b);
 }
 
+/// Damerau-Levenshtein distance with buffer allocation
 pub fn damerauLevenshteinDistanceAlloc(TStr: type, TBuf: type, allocator: std.mem.Allocator, a: []const TStr, b: []const TStr) !TBuf {
     const dp = try allocator.alloc(TBuf, (a.len + 1) * (b.len + 1));
     defer allocator.free(dp);
     return damerauLevenshteinDistance(TStr, TBuf, dp, a, b);
+}
+
+fn stringBackingTypeGuard(comptime T: type) void {
+    if (!util.isCharType(T)) @compileError("Unsupported string backing type " ++ @typeName(T));
+}
+
+fn isStringType(comptime T: type) bool {
+    if (T == Utf8) return true;
+    return util.isStringSlice(T);
+}
+
+fn StringElementType(comptime T: type) type {
+    if (T == Utf8) return u8;
+
+    return switch (@typeInfo(T)) {
+        .pointer => |ptr| ptr.child,
+        .array => |arr| arr.child,
+        else => unreachable,
+    };
 }
 
 test levenshteinDistanceAlloc {
@@ -1194,6 +1221,7 @@ test damerauLevenshteinDistanceAlloc {
     try std.testing.expectEqual(@as(u32, 1), dist);
 }
 
+/// Converts UTF-8 bytes into UTF-32 codepoints on a given buffer
 pub fn utf8ToU32OnBuffer(buffer: []u32, utf8: []const u8) error{InvalidUtf8}![]u32 {
     const view = std.unicode.Utf8View.init(utf8) catch return error.InvalidUtf8;
     var it = view.iterator();
@@ -1205,6 +1233,7 @@ pub fn utf8ToU32OnBuffer(buffer: []u32, utf8: []const u8) error{InvalidUtf8}![]u
     return buffer[0..i];
 }
 
+/// Binomial coefficient nCk
 pub fn binomial(n: usize, k: usize) u64 {
     if (k > n) return 0;
     if (k == 0 or k == n) return 1;
@@ -1217,6 +1246,7 @@ pub fn binomial(n: usize, k: usize) u64 {
     return res;
 }
 
+/// Maximum number of unique deletes for given word length and delete distance
 pub fn maxDeletes(n: usize, d: usize) u64 {
     var sum: u64 = 1;
     for (0..d) |k| {
@@ -1225,6 +1255,8 @@ pub fn maxDeletes(n: usize, d: usize) u64 {
     return sum;
 }
 
+/// Next lexicographic permutation of the input slice
+/// Returns false if the next permutation does not exist
 pub fn nextPermutation(T: type, str: []T) bool {
     const len = str.len;
     if (len <= 1) return false;
@@ -1436,7 +1468,7 @@ test "SymSpell random ascii uncompressed exits index" {
         inline fn editDistanceBuffer(_: void, buffer: []u32, word1: []const u8, word2: []const u8) u32 {
             return levenshteinDistance(u8, u32, buffer, word1, word2);
         }
-        inline fn strLen(_: void, word: []const u8) usize {
+        inline fn strLen(_: void, word: []const u8) ?usize {
             return word.len;
         }
         fn wordMaxDistance(_: void, _: []const u8) usize {
@@ -1457,7 +1489,7 @@ fn trimSpaces(slice: []const u8) []const u8 {
     return std.mem.trim(u8, slice, " \t");
 }
 
-pub fn getSectionLines(allocator: std.mem.Allocator, content: []const u8, section_name: []const u8) ![][]const u8 {
+fn getSectionLines(allocator: std.mem.Allocator, content: []const u8, section_name: []const u8) ![][]const u8 {
     var lines = std.ArrayListUnmanaged([]const u8){};
     defer lines.deinit(allocator);
 

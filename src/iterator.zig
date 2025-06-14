@@ -1,6 +1,8 @@
 const std = @import("std");
 const iface = @import("interface.zig");
 
+/// Defines a minimal forward `Iterator` interface for a given element type `T`
+/// Intended only as a comptime reference for `interface.zig` -> `checkImplements`
 pub fn Iterator(T: type) type {
     return struct {
         pub fn size(_: *const @This()) usize {
@@ -13,6 +15,8 @@ pub fn Iterator(T: type) type {
     };
 }
 
+/// Defines a `RandomAccessIterator` interface supporting indexing, movement, and reverse iteration
+/// Intended only as a comptime reference for `interface.zig` -> `checkImplements`
 pub fn RandomAccessIterator(T: type) type {
     return struct {
         pub fn size(_: *const @This()) usize {
@@ -37,6 +41,7 @@ pub fn RandomAccessIterator(T: type) type {
     };
 }
 
+/// `RandomAccessIterator` over a slice of `T`
 pub fn SliceIterator(T: type) type {
     return struct {
         const Self = @This();

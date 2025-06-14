@@ -7,6 +7,8 @@ const iterator = @import("iterator.zig");
 
 const toF64 = util.toF64;
 
+/// Interface definition for bucket mappers
+/// Intended only as a comptime reference for `interface.zig` -> `checkImplements`
 fn IMapper(Hash: type) type {
     return struct {
         pub fn numBuckets(_: @This()) usize {
@@ -18,6 +20,8 @@ fn IMapper(Hash: type) type {
     };
 }
 
+/// Interface definition for hashers used in PTHash
+/// Intended only as a comptime reference for `interface.zig` -> `checkImplements`
 fn IHasher(Seed: type, Key: type, Hash: type) type {
     return struct {
         pub fn hashKey(_: @This(), _: Seed, _: Key) Hash {
@@ -29,6 +33,7 @@ fn IHasher(Seed: type, Key: type, Hash: type) type {
     };
 }
 
+/// Skewed mapper for PTHash, from original paper
 pub fn SkewedMapper(Hash: type) type {
     return struct {
         const Self = @This();
@@ -62,6 +67,7 @@ pub fn SkewedMapper(Hash: type) type {
     };
 }
 
+/// Optimal mapper for PTHash, from PTHash PHOBIC paper
 pub fn OptimalMapper(Hash: type) type {
     return struct {
         const Self = @This();
@@ -96,7 +102,8 @@ pub fn OptimalMapper(Hash: type) type {
     };
 }
 
-fn DefaultHasher(comptime Key: type) type {
+/// Default hasher for string-like keys using Wyhash and Murmur
+pub fn DefaultHasher(comptime Key: type) type {
     if (!util.isStringSlice(Key)) @compileError("Unsupported string type " ++ @typeName(Key));
 
     return struct {
@@ -110,9 +117,9 @@ fn DefaultHasher(comptime Key: type) type {
     };
 }
 
+/// Configuration for PTHash construction
 pub fn PTHashConfig(Mapper: type, Hasher: type) type {
     return struct {
-        lambda: f64,
         alpha: f64,
         minimal: bool,
         hashed_pilot_cache_size: usize,
@@ -122,15 +129,14 @@ pub fn PTHashConfig(Mapper: type, Hasher: type) type {
     };
 }
 
+/// Generic PTHash implementation (minimal perfect hash or compressed)
 pub fn GenericPTHash(
     Seed: type,
     Hash: type,
     Key: type,
-    KeyIterator: type,
     Mapper: type,
     Hasher: type,
 ) type {
-    iface.checkImplementsGuard(iterator.Iterator(Key), KeyIterator);
     iface.checkImplementsGuard(IMapper(Hash), Mapper);
     iface.checkImplementsGuard(IHasher(Seed, Key, Hash), Hasher);
 
@@ -163,27 +169,37 @@ pub fn GenericPTHash(
             self.* = undefined;
         }
 
+        /// Builds a PTHash using random seed. Calls `buildSeed` internally
         pub fn build(
             allocator: std.mem.Allocator,
-            keys: *KeyIterator,
+            comptime KeyIterator: type,
+            keys: KeyIterator,
             config: PTHashConfig(Mapper, Hasher),
         ) !Self {
+            iface.checkImplementsGuard(iterator.Iterator(Key), iface.UnPtr(KeyIterator));
+
             var l_seed: Seed = undefined;
             try std.posix.getrandom(std.mem.asBytes(&l_seed));
-            return buildSeed(allocator, keys, config, l_seed);
+            return buildSeed(allocator, KeyIterator, keys, config, l_seed);
         }
 
+        /// Returns the total size of the final table
+        /// If `minimal` is true, this is equal to the number of input keys
         pub fn size(self: *const Self) usize {
             if (self.config.minimal) return self.num_keys;
             return self.table_size;
         }
 
-        fn buildSeed(
+        /// Builds PFH or MPFH using a fixed seed
+        pub fn buildSeed(
             allocator: std.mem.Allocator,
-            keys: *KeyIterator,
+            comptime KeyIterator: type,
+            keys: KeyIterator,
             config: PTHashConfig(Mapper, Hasher),
             seed: Seed,
         ) !Self {
+            iface.checkImplementsGuard(iterator.Iterator(Key), iface.UnPtr(KeyIterator));
+
             const hashes = try allocator.alloc(BucketHash, keys.size());
             defer allocator.free(hashes);
             {
@@ -254,7 +270,7 @@ pub fn GenericPTHash(
 
             var table = try bit.BitArray.initCapacity(allocator, table_size);
             defer table.deinit(allocator);
-            table.clearAllAssumeCapacity();
+            table.clearAll();
 
             var pilots = try allocator.alloc(u64, num_buckets + 2);
             defer allocator.free(pilots);
@@ -305,7 +321,7 @@ pub fn GenericPTHash(
             if (config.minimal) {
                 var free_slots = try allocator.alloc(u64, table_size - hashes.len);
                 defer allocator.free(free_slots);
-                @memset(pilots, 0);
+                @memset(free_slots, 0);
 
                 var prev: usize = 0;
                 var i_free: usize = 0;
@@ -322,7 +338,7 @@ pub fn GenericPTHash(
                     }
                 }
 
-                var iter_fs = iterator.SliceIterator(u64).init(pilots);
+                var iter_fs = iterator.SliceIterator(u64).init(free_slots);
                 enc_free_slots = try ef.EliasFano.init(allocator, free_slots[free_slots.len - 1], @TypeOf(&iter_pilots), &iter_fs);
                 errdefer enc_free_slots.deinit(allocator);
             }
@@ -337,6 +353,7 @@ pub fn GenericPTHash(
             };
         }
 
+        /// Get the index of a given key in the table
         pub fn get(self: *const Self, key: Key) !u64 {
             const hash = self.config.hasher.hashKey(self.seed, key);
             const bucket = self.config.mapper.getBucket(hash);
@@ -351,26 +368,33 @@ pub fn GenericPTHash(
     };
 }
 
+/// Parameter struct with defaults for PTHash wrapper
 pub const PTHashParams = struct {
-    lambda: f64 = 4.5,
+    /// Average bucket size
+    lambda: f64 = 3.5,
+    /// Load factor
     alpha: f64 = 0.97,
+    /// Whether to build a minimal perfect hash
     minimal: bool = false,
+    /// Fixed number of buckets to use, overrides automatic estimation if set
     num_buckets: ?usize = null,
+    /// Cache size for hashed pilot values during construction
     hashed_pilot_cache_size: usize = 4096,
+    /// Maximum allowed size for any individual bucket
     max_bucket_size: usize = 255,
 };
 
+/// Wrapper to simplify PTHash instantiation
 pub fn PTHash(
     comptime Key: type,
     comptime Mapper: type,
-    comptime KeyIterator: type,
 ) type {
     if (Mapper != OptimalMapper(u64) and Mapper != SkewedMapper(u64)) {
         @compileError("Unknown mapper " ++ @typeInfo(Mapper) ++ ", please use GenericPTHash");
     }
     const Seed = u64;
     const Hasher = DefaultHasher(Key);
-    const T = GenericPTHash(Seed, u64, Key, KeyIterator, Mapper, Hasher);
+    const T = GenericPTHash(Seed, u64, Key, Mapper, Hasher);
 
     return struct {
         pub const Type = T;
@@ -393,7 +417,6 @@ pub fn PTHash(
             };
 
             return .{
-                .lambda = params.lambda,
                 .alpha = params.alpha,
                 .minimal = params.minimal,
                 .hashed_pilot_cache_size = params.hashed_pilot_cache_size,
@@ -405,19 +428,21 @@ pub fn PTHash(
 
         pub fn build(
             allocator: std.mem.Allocator,
-            keys: *KeyIterator,
+            comptime KeyIterator: type,
+            keys: KeyIterator,
             config: PTHashConfig(Mapper, Hasher),
         ) !T {
-            return T.build(allocator, keys, config);
+            return T.build(allocator, KeyIterator, keys, config);
         }
 
-        fn buildSeed(
+        pub fn buildSeed(
             allocator: std.mem.Allocator,
-            keys: *KeyIterator,
+            comptime KeyIterator: type,
+            keys: KeyIterator,
             config: PTHashConfig(Mapper, Hasher),
             seed: Seed,
         ) !T {
-            return T.buildSeed(allocator, keys, config, seed);
+            return T.buildSeed(allocator, KeyIterator, keys, config, seed);
         }
     };
 }
@@ -439,8 +464,8 @@ test "PTHash" {
     const start = std.time.nanoTimestamp();
 
     var iter = iterator.SliceIterator([]const u8).init(data);
-    const PTHashT = PTHash([]const u8, OptimalMapper(u64), @TypeOf(iter));
-    var res = try PTHashT.buildSeed(allocator, &iter, PTHashT.buildConfig(iter.size(), .{
+    const PTHashT = PTHash([]const u8, OptimalMapper(u64));
+    var res = try PTHashT.buildSeed(allocator, @TypeOf(&iter), &iter, PTHashT.buildConfig(iter.size(), .{
         .lambda = 3.5,
         .alpha = 0.97,
         .minimal = false,

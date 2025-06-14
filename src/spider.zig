@@ -1,7 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const util = @import("util.zig");
 const bitops = @import("bitops.zig");
 
+/// Data structure for bit-based rank and select queries
 pub const Spider = struct {
     pub const Error = error{OutOfBounds} || std.mem.Allocator.Error || bitops.NthSetBitError;
 
@@ -25,6 +27,7 @@ pub const Spider = struct {
     sd1: SelectData,
     sd0: SelectData,
 
+    /// Creates a SPIDER from a bit array and total number of bits
     pub fn init(allocator: std.mem.Allocator, bits: []const u8, num_bits: u64) Error!Self {
         if (num_bits == 0) return Error.OutOfBounds;
         if ((num_bits - 1) >> 3 + 1 > bits.len) return Error.OutOfBounds;
@@ -139,17 +142,18 @@ pub const Spider = struct {
         var ll_select = std.ArrayListUnmanaged(u16){};
         defer ll_select.deinit(allocator);
 
+        const num_bytes = bit_array.len;
         const c_count = if (flip) num_bits - cumulative_count else cumulative_count;
 
-        const s_hl_pow: u6 = @intCast(std.math.log2_int_ceil(u64, @intFromFloat(@as(f64, @floatFromInt(sb_size * c_count)) / @as(f64, @floatFromInt(num_bits)))));
-        const s_ll_pow: u4 = @intCast(std.math.log2_int_ceil(u64, @intFromFloat(4096.0 * 0.99 * @as(f64, @floatFromInt(c_count)) / @as(f64, @floatFromInt(num_bits)))));
+        const s_hl_pow: u6 = @intCast(util.log2IntCeilOrZero(u64, @intFromFloat(@ceil(toF64(sb_size * c_count) / toF64(num_bits)))));
+        const s_ll_pow: u4 = @intCast(util.log2IntCeilOrZero(u64, @intFromFloat(@ceil(4096.0 * 0.99 * toF64(c_count) / toF64(num_bits)))));
 
-        try hl_select.ensureTotalCapacityPrecise(allocator, @as(usize, 2) + (std.math.divCeil(usize, c_count, @as(u64, 1) << s_hl_pow) catch 0));
-        try ll_select.ensureTotalCapacityPrecise(allocator, @as(usize, 2) + (std.math.divCeil(usize, c_count, @as(u64, 1) << s_ll_pow) catch 0));
+        try hl_select.ensureTotalCapacityPrecise(allocator, @as(usize, 3) + (std.math.divCeil(usize, c_count, @as(u64, 1) << s_hl_pow) catch 0));
+        try ll_select.ensureTotalCapacityPrecise(allocator, @as(usize, 3) + (std.math.divCeil(usize, c_count, @as(u64, 1) << s_ll_pow) catch 0));
         var pos: u64 = 0;
         var k: u64 = 0;
 
-        for (0..bit_array.len) |m| {
+        for (0..num_bytes) |m| {
             if (m % 64 == 0 or (m - 1) % 64 == 0) continue;
             const it = if (flip) ~bit_array[m] else bit_array[m];
             if (it == 0) continue;
@@ -166,7 +170,7 @@ pub const Spider = struct {
 
         var sel_n1: u64 = 0;
 
-        for (k..bit_array.len) |m| {
+        for (k..num_bytes) |m| {
             if (m % 64 == 0 or (m - 1) % 64 == 0) continue;
             pos = (m - ((m >> 6) + 1) * 2) << 3;
 
@@ -217,6 +221,7 @@ pub const Spider = struct {
         self.* = undefined;
     }
 
+    /// Returns the number of 1 bits up to and including index `i`
     pub fn rank1(self: *Self, i: u64) Error!u64 {
         if (i == 0 or i > self.size) return Error.OutOfBounds;
 
@@ -239,10 +244,12 @@ pub const Spider = struct {
         return self.hl_rank[ri] + self.r_count1(x) + count;
     }
 
+    /// Returns the position of the i-th 0 bit. `i` - 1-based index; result - 0-based index
     pub fn select0(self: *const Self, i: u64) Error!u64 {
         return self.select_general(i, &self.sd0, true);
     }
 
+    /// Returns the position of the i-th 1 bit. `i` - 1-based index; result - 0-based index
     pub fn select1(self: *const Self, i: u64) Error!u64 {
         return self.select_general(i, &self.sd1, false);
     }
@@ -276,13 +283,15 @@ pub const Spider = struct {
         var p = @as(u64, s << 10) + (a + ((i - (l << s_data.sigma_ll_pow)) * (b - a) >> s_data.sigma_ll_pow)) / 62;
         // var p: u64 = (sb_size * s + a + (((i - (l << self.sigmaLlPow)) * (b - a)) >> self.sigmaLlPow)) / 496;
 
-        while ((p << 6 >= self.bit_array.len) or i <= r_count(self, p) + count(self, p >> 7)) p -|= 1;
-        while (((p + 1) << 6 < self.bit_array.len) and i > r_count(self, p + 1) + count(self, (p + 1) >> 7)) p +|= 1;
+        const num_bytes = self.bit_array.len;
+
+        while ((p << 6 >= num_bytes) or i <= r_count(self, p) + count(self, p >> 7)) p -|= 1;
+        while (((p + 1) << 6 < num_bytes) and i > r_count(self, p + 1) + count(self, (p + 1) >> 7)) p +|= 1;
 
         const target = i - (r_count(self, p) + count(self, p >> 7));
 
         var rel_count: usize = 0;
-        for (((p << 6) + 2)..self.bit_array.len) |m| {
+        for (((p << 6) + 2)..num_bytes) |m| {
             if (m % 64 == 0 or (m - 1) % 64 == 0) continue;
 
             const byte = if (flip) ~self.bit_array[m] else self.bit_array[m];
@@ -317,6 +326,7 @@ pub const Spider = struct {
         return std.mem.readInt(u16, self.bit_array[(i << 6)..][0..2], builtin.cpu.arch.endian());
     }
 
+    /// Builder for constructing SPIDER
     pub const Builder = struct {
         pub const Error = error{InvalidN};
         const bufferSize = 128;
@@ -330,6 +340,7 @@ pub const Spider = struct {
         relative_count: u16,
         buffer: u8,
 
+        /// Creates a Builder that can hold up to `num_bits` bits
         pub fn initWithTotalCapacity(allocator: std.mem.Allocator, num_bits: u64) !Builder.Self {
             const hl_rank, const bit_array = try alloc_rank_arrays(allocator, num_bits);
 
@@ -350,7 +361,7 @@ pub const Spider = struct {
             self.* = undefined;
         }
 
-        /// Insert n lsb of data
+        /// Appends `n` lsb of `data` to the bitstream
         pub fn append(self: *Builder.Self, data: anytype, n: u16) Builder.Error!void {
             const T = @TypeOf(data);
             const U = u8;
@@ -377,6 +388,7 @@ pub const Spider = struct {
             }
         }
 
+        /// Finalizes and builds SPIDER
         pub fn build(self: *Builder.Self, allocator: std.mem.Allocator) !Spider {
             if (self.buffer != 0) {
                 rank_byte(self.buffer, self.bits_written >> 3, &self.cumulative_count, &self.relative_count, &self.hl_rank, &self.bit_array);
@@ -398,6 +410,8 @@ pub const Spider = struct {
         }
     };
 };
+
+const toF64 = util.toF64;
 
 const testing = std.testing;
 

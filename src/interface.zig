@@ -1,5 +1,6 @@
 const std = @import("std");
 
+/// Returns an error message if `Target` does not implement `Interface`, otherwise null.
 pub fn checkImplementsMessage(comptime Interface: type, comptime Target: type) ?[]const u8 {
     comptime {
         const interface_info = @typeInfo(Interface);
@@ -118,6 +119,7 @@ pub fn checkImplements(comptime Interface: type, comptime Target: type) bool {
     }
 }
 
+/// Removes one level of pointer indirection from a type, if it is a pointer
 pub fn UnPtr(comptime T: type) type {
     const info = @typeInfo(T);
     if (info == .pointer) {

@@ -1,8 +1,10 @@
 const std = @import("std");
 const bitops = @import("bitops.zig");
 
+/// BitArray backed by usize slice
 pub const BitArray = GenericBitArray(usize);
 
+/// Returns a bit array type backed by the given unsigned integer type
 pub fn GenericBitArray(comptime T: type) type {
     if (@typeInfo(T) != .int or @typeInfo(T).int.signedness != .unsigned)
         @compileError("BitArrayT requires an unsigned integer as backing type, found " ++ @typeName(T));
@@ -15,9 +17,12 @@ pub fn GenericBitArray(comptime T: type) type {
         const TSize = usize;
 
         data: std.ArrayListUnmanaged(T),
+        /// Size in bits
         bit_len: TSize,
+        /// Capacity in bits
         capacity: TSize,
 
+        /// Initializes an empty bit array with no allocation
         pub fn init() Self {
             return Self{
                 .data = std.ArrayListUnmanaged(T){},
@@ -26,6 +31,7 @@ pub fn GenericBitArray(comptime T: type) type {
             };
         }
 
+        /// Initializes a bit array with a given number of bits preallocated
         pub fn initCapacity(allocator: std.mem.Allocator, num: TSize) MemError!Self {
             var self = Self{
                 .data = std.ArrayListUnmanaged(T){},
@@ -66,7 +72,7 @@ pub fn GenericBitArray(comptime T: type) type {
             }
         }
 
-        /// Insert n lsb of data
+        /// Appends `n` lsb of `data`, growing memory as needed
         pub fn append(self: *Self, allocator: std.mem.Allocator, data: anytype, n: std.math.Log2IntCeil(@TypeOf(data))) MemError!void {
             if (@typeInfo(@TypeOf(data)) != .int or @typeInfo(@TypeOf(n)).int.signedness != .unsigned)
                 @compileError("BitArrayT.append requires an unsigned integer, found " ++ @TypeOf(data));
@@ -79,9 +85,11 @@ pub fn GenericBitArray(comptime T: type) type {
                     try c.s.data.append(c.a, 0);
                 }
             }.func);
+
+            self.capacity = self.data.items.len * 8;
         }
 
-        /// Insert n lsb of data
+        /// Appends `n` lsb of `data`, assuming capacity is sufficient
         pub fn appendAssumeCapacity(self: *Self, data: anytype, n: std.math.Log2IntCeil(@TypeOf(data))) void {
             if (@typeInfo(@TypeOf(data)) != .int or @typeInfo(@TypeOf(n)).int.signedness != .unsigned)
                 @compileError("BitArrayT.append requires an unsigned integer, found " ++ @TypeOf(data));
@@ -94,18 +102,21 @@ pub fn GenericBitArray(comptime T: type) type {
             }.func) catch unreachable;
         }
 
-        pub fn clearAllAssumeCapacity(self: *Self) void {
+        /// Sets all bits to zero
+        pub fn clearAll(self: *Self) void {
             self.data.items.len = self.data.capacity;
             self.bit_len = self.capacity;
             @memset(self.data.items, 0);
         }
 
-        pub fn setAllAssumeCapacity(self: *Self) void {
+        /// Sets all bits to one
+        pub fn setAll(self: *Self) void {
             self.data.items.len = self.data.capacity;
             self.bit_len = self.capacity;
             @memset(self.data.items, std.math.maxInt(T));
         }
 
+        /// Returns @bitSizeOf(U) bits starting at bit `index`
         pub fn get(self: *const Self, comptime U: type, index: TSize) Error!U {
             var i = index / @bitSizeOf(T);
             var k = index % @bitSizeOf(T);
@@ -132,7 +143,8 @@ pub fn GenericBitArray(comptime T: type) type {
             return result;
         }
 
-        pub fn getRt(self: *const Self, comptime Out: type, n: std.math.Log2IntCeil(Out), i: TSize) Error!Out {
+        /// Returns `n` bits starting at bit `index` as `Out`
+        pub fn getN(self: *const Self, comptime Out: type, n: std.math.Log2IntCeil(Out), i: TSize) Error!Out {
             return switch (n) {
                 inline 1...@bitSizeOf(Out) => |k| @intCast(try self.get(
                     std.meta.Int(.unsigned, k),
@@ -142,11 +154,13 @@ pub fn GenericBitArray(comptime T: type) type {
             };
         }
 
+        /// True if bit at index `i` is set
         pub fn isSet(self: *const Self, i: TSize) bool {
             const item = self.data.items[i / @bitSizeOf(T)];
             return item & (@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - i % @bitSizeOf(T))) != 0;
         }
 
+        /// Finds the next bit equal to `query` (0 or 1) starting from bit `start`
         pub fn idxNext(self: *const BitArray, start: TSize, comptime query: u1) ?TSize {
             if (start >= self.bit_len)
                 return null;
@@ -169,11 +183,13 @@ pub fn GenericBitArray(comptime T: type) type {
             return null;
         }
 
+        /// Sets bit at index `i` to one
         pub fn set(self: *Self, i: TSize) void {
             self.data.items[i / @bitSizeOf(T)] =
                 self.data.items[i / @bitSizeOf(T)] | (@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - i % @bitSizeOf(T)));
         }
 
+        /// Sets bit at index `i` to zero
         pub fn clear(self: *Self, i: TSize) void {
             self.data.items[i / @bitSizeOf(T)] =
                 self.data.items[i / @bitSizeOf(T)] & ~(@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - i % @bitSizeOf(T)));

@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const NthSetBitError = error{ InvalidN, NotFound };
 
+/// Returns the index (0-based, from msb) of the n-th set bit in `src`
+/// Requires `src` to be an unsigned integer
 pub fn nthSetBitPos(src: anytype, n: std.math.Log2IntCeil(@TypeOf(src))) NthSetBitError!std.math.Log2Int(@TypeOf(src)) {
     const T = @TypeOf(src);
     if (@typeInfo(T) != .int or @typeInfo(T).int.signedness != .unsigned)
@@ -24,12 +26,13 @@ pub fn nthSetBitPos(src: anytype, n: std.math.Log2IntCeil(@TypeOf(src))) NthSetB
     return error.NotFound;
 }
 
-pub inline fn shlWithOverflow(n: anytype, shift: usize) @TypeOf(n) {
-    if (@typeInfo(@TypeOf(n)) != .int or @typeInfo(@TypeOf(n)).int.signedness != .unsigned)
-        @compileError("shlWithOverflow requires an unsigned integer, found " ++ @TypeOf(n));
+/// Returns `src << shift` as unsigned, ignoring overflow bits
+pub inline fn shlWithOverflow(src: anytype, shift: usize) @TypeOf(src) {
+    if (@typeInfo(@TypeOf(src)) != .int or @typeInfo(@TypeOf(src)).int.signedness != .unsigned)
+        @compileError("shlWithOverflow requires an unsigned integer, found " ++ @TypeOf(src));
 
-    const T = @TypeOf(n);
-    const num = @shlWithOverflow(n, @as(std.math.Log2Int(T), @intCast(shift)));
+    const T = @TypeOf(src);
+    const num = @shlWithOverflow(src, @as(std.math.Log2Int(T), @intCast(shift)));
     return num[0];
 }
 
