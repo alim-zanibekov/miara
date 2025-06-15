@@ -1,5 +1,4 @@
 const std = @import("std");
-const bitops = @import("bitops.zig");
 
 /// BitArray backed by usize slice
 pub const BitArray = GenericBitArray(usize);
@@ -216,17 +215,45 @@ pub fn GenericBitArray(comptime T: type) type {
     };
 }
 
+pub const NthSetBitError = error{ InvalidN, NotFound };
+
+/// Returns the index (0-based, from msb) of the n-th set bit in `src`
+/// Requires `src` to be an unsigned integer
+pub fn nthSetBitPos(src: anytype, n: std.math.Log2IntCeil(@TypeOf(src))) NthSetBitError!std.math.Log2Int(@TypeOf(src)) {
+    const T = @TypeOf(src);
+    if (@typeInfo(T) != .int or @typeInfo(T).int.signedness != .unsigned)
+        @compileError("nthSetBitPos requires an unsigned integer, found " ++ @typeName(T));
+
+    if (n == 0 or n > @typeInfo(T).int.bits) {
+        return NthSetBitError.InvalidN;
+    }
+
+    var count: usize = 0;
+    inline for (0..@typeInfo(T).int.bits) |i| {
+        if (src & (@as(T, 1) << @intCast(@typeInfo(T).int.bits - 1 - i)) > 0) {
+            count += 1;
+            if (count == n) {
+                return @intCast(i);
+            }
+        }
+    }
+
+    return error.NotFound;
+}
+
+const testing = std.testing;
+
 test "bitArrayAppendAlloc" {
     const seed = 0x224740f963;
     var r = std.Random.DefaultPrng.init(seed);
     var random = r.random();
 
     var c = BitArray.init();
-    defer c.deinit(std.testing.allocator);
+    defer c.deinit(testing.allocator);
     const Y = usize;
 
     for (0..1000) |_| {
-        try c.appendUInt(std.testing.allocator, random.int(Y), @bitSizeOf(Y));
+        try c.appendUInt(testing.allocator, random.int(Y), @bitSizeOf(Y));
     }
 
     r = std.Random.DefaultPrng.init(seed);
@@ -236,7 +263,7 @@ test "bitArrayAppendAlloc" {
     for (0..(1000 * @bitSizeOf(Y))) |i| {
         if (i % @bitSizeOf(Y) == 0) number = random.int(Y);
         const v = number & (@as(Y, 1) << @intCast(@bitSizeOf(Y) - 1 - (i % @bitSizeOf(Y)))) != 0;
-        try std.testing.expectEqual(v, c.isSet(i));
+        try testing.expectEqual(v, c.isSet(i));
     }
 }
 
@@ -248,10 +275,10 @@ test "bitArrayInitAlloc" {
     var random = r.random();
 
     const T = usize;
-    var array = try BitArray.initCapacity(std.testing.allocator, n * @bitSizeOf(T));
-    defer array.deinit(std.testing.allocator);
+    var array = try BitArray.initCapacity(testing.allocator, n * @bitSizeOf(T));
+    defer array.deinit(testing.allocator);
 
-    var numbers = try std.ArrayList(T).initCapacity(std.testing.allocator, n);
+    var numbers = try std.ArrayList(T).initCapacity(testing.allocator, n);
     defer numbers.deinit();
 
     for (0..n) |_| numbers.appendAssumeCapacity(random.int(T));
@@ -268,7 +295,7 @@ test "bitArrayInitAlloc" {
     for (numbers.items, 0..) |number, pos| {
         const i = pos * @bitSizeOf(T);
         const v = number & (@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - (i % @bitSizeOf(T)))) != 0;
-        try std.testing.expectEqual(v, array.isSet(i));
+        try testing.expectEqual(v, array.isSet(i));
     }
 }
 
@@ -280,10 +307,10 @@ test "bitArrayCustomBufferType" {
             var random = r.random();
 
             const Y = usize;
-            var c = try GenericBitArray(U).initCapacity(std.testing.allocator, n * @bitSizeOf(Y));
-            defer c.deinit(std.testing.allocator);
+            var c = try GenericBitArray(U).initCapacity(testing.allocator, n * @bitSizeOf(Y));
+            defer c.deinit(testing.allocator);
 
-            var numbers = try std.ArrayList(Y).initCapacity(std.testing.allocator, n);
+            var numbers = try std.ArrayList(Y).initCapacity(testing.allocator, n);
             defer numbers.deinit();
 
             for (0..n) |_| numbers.appendAssumeCapacity(random.int(Y));
@@ -300,14 +327,14 @@ test "bitArrayCustomBufferType" {
             for (0..(n * @bitSizeOf(Y))) |i| {
                 const number = numbers.items[i / @bitSizeOf(Y)];
                 const v = number & (@as(Y, 1) << @intCast(@bitSizeOf(Y) - 1 - (i % @bitSizeOf(Y)))) != 0;
-                try std.testing.expectEqual(v, c.isSet(i));
+                try testing.expectEqual(v, c.isSet(i));
             }
 
             for (numbers.items, 0..) |num, i| {
-                try std.testing.expectEqual(num, c.get(Y, i * @bitSizeOf(Y)));
+                try testing.expectEqual(num, c.get(Y, i * @bitSizeOf(Y)));
             }
 
-            try std.testing.expectError(error.IndexOutOfBounds, c.get(Y, 1000 * @bitSizeOf(Y)));
+            try testing.expectError(error.IndexOutOfBounds, c.get(Y, 1000 * @bitSizeOf(Y)));
         }
     }.func;
 

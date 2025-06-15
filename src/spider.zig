@@ -1,11 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const util = @import("util.zig");
-const bitops = @import("bitops.zig");
+const bit = @import("bit.zig");
 
 /// Data structure for bit-based rank and select queries
 pub const Spider = struct {
-    pub const Error = error{OutOfBounds} || std.mem.Allocator.Error || bitops.NthSetBitError;
+    pub const Error = error{OutOfBounds} || std.mem.Allocator.Error || bit.NthSetBitError;
 
     const sb_size = 63488; // superblock_size
     const Self = @This();
@@ -181,7 +181,7 @@ pub const Spider = struct {
                 hl_count += count;
             } else {
                 const ones_left = (@as(u64, 1) << s_hl_pow) - hl_count;
-                const r_pos = try bitops.nthSetBitPos(byte, @intCast(ones_left));
+                const r_pos = try bit.nthSetBitPos(byte, @intCast(ones_left));
                 hl_select.appendAssumeCapacity(((pos + r_pos) + (sb_size >> 1)) / sb_size);
                 hl_count = count - ones_left;
             }
@@ -190,13 +190,13 @@ pub const Spider = struct {
                 ll_count += count;
             } else {
                 const ones_left = (@as(u16, 1) << s_ll_pow) - ll_count;
-                const r_pos = try bitops.nthSetBitPos(byte, @intCast(ones_left));
+                const r_pos = try bit.nthSetBitPos(byte, @intCast(ones_left));
                 ll_select.appendAssumeCapacity(@intCast((pos + r_pos) - ((pos >> s_ll_pow) << s_ll_pow)));
                 ll_count = count - ones_left;
             }
 
             if (count > 0) {
-                sel_n1 = pos + try bitops.nthSetBitPos(byte, @intCast(count));
+                sel_n1 = pos + try bit.nthSetBitPos(byte, @intCast(count));
             }
         }
 
@@ -300,7 +300,7 @@ pub const Spider = struct {
             if (rel_count + b_count < target) {
                 rel_count += b_count;
             } else {
-                const r_pos = bitops.nthSetBitPos(byte, @intCast(target - rel_count)) catch 0;
+                const r_pos = bit.nthSetBitPos(byte, @intCast(target - rel_count)) catch 0;
                 return ((m - ((m >> 6) + 1) * 2) << 3) + r_pos;
             }
         }
@@ -449,9 +449,9 @@ test "spiderBuilder" {
     var count: u64 = 0;
 
     for (0..buf_size) |i| {
-        const bit = random.uintAtMost(U, @bitSizeOf(U) - 1) + 1;
-        const expectation = count + @popCount(data[i] >> @intCast(@bitSizeOf(U) - bit));
-        const rank = try spider.rank1((i * @bitSizeOf(U)) + bit);
+        const b = random.uintAtMost(U, @bitSizeOf(U) - 1) + 1;
+        const expectation = count + @popCount(data[i] >> @intCast(@bitSizeOf(U) - b));
+        const rank = try spider.rank1((i * @bitSizeOf(U)) + b);
         try testing.expectEqual(expectation, rank);
         count += @popCount(data[i]);
     }
@@ -479,9 +479,9 @@ test "spiderRank" {
     var count: u64 = 0;
 
     for (0..buf_size) |i| {
-        const bit = random.uintAtMost(u4, 8);
-        const expectation = count + @popCount(@as(u16, data[i]) >> @intCast(8 - bit));
-        const rank = try spider.rank1((i * 8) + bit);
+        const b = random.uintAtMost(u4, 8);
+        const expectation = count + @popCount(@as(u16, data[i]) >> @intCast(8 - b));
+        const rank = try spider.rank1((i * 8) + b);
         try testing.expectEqual(expectation, rank);
         count += @popCount(data[i]);
     }
@@ -511,7 +511,7 @@ test "spiderSelect1" {
     for (0..buf_size) |i| {
         if (data[i] == 0) continue;
         const n = random.uintAtMost(u4, @popCount(data[i]) - 1) + 1;
-        const pos = try bitops.nthSetBitPos(data[i], n);
+        const pos = try bit.nthSetBitPos(data[i], n);
         const expectation = i * 8 + pos;
 
         const select = try spider.select1(count + n);
@@ -546,7 +546,7 @@ test "spiderSelect0" {
         const byte = ~data[i];
         if (byte == 0) continue;
         const n = random.uintAtMost(u4, @popCount(byte) - 1) + 1;
-        const pos = try bitops.nthSetBitPos(byte, n);
+        const pos = try bit.nthSetBitPos(byte, n);
         const expectation = i * 8 + pos;
 
         const select = try spider.select0(count + n);
