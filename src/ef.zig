@@ -55,7 +55,7 @@ pub fn GenericEliasFano(T: type) type {
                     bucket += 1;
                 }
                 try hb.append(@as(u1, 1), 1);
-                lb.appendAssumeCapacity(it, low_n);
+                if (low_n > 0) lb.appendUIntAssumeCapacity(it, low_n);
             }
 
             const spider = try hb.build(allocator);
@@ -76,7 +76,7 @@ pub fn GenericEliasFano(T: type) type {
         /// Returns the i-th element in array
         pub fn get(self: *const Self, i: usize) !T {
             const h_bits = try self.higher_bits.select1(i + 1) - i;
-            const l_bits = if (self.low_n > 0) try self.lower_bits.getN(T, @intCast(self.low_n), self.low_n * i) else 0;
+            const l_bits = if (self.low_n > 0) try self.lower_bits.getVar(T, @intCast(self.low_n), self.low_n * i) else 0;
             return (h_bits << @intCast(self.low_n)) | l_bits;
         }
 

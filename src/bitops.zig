@@ -26,16 +26,6 @@ pub fn nthSetBitPos(src: anytype, n: std.math.Log2IntCeil(@TypeOf(src))) NthSetB
     return error.NotFound;
 }
 
-/// Returns `src << shift` as unsigned, ignoring overflow bits
-pub inline fn shlWithOverflow(src: anytype, shift: usize) @TypeOf(src) {
-    if (@typeInfo(@TypeOf(src)) != .int or @typeInfo(@TypeOf(src)).int.signedness != .unsigned)
-        @compileError("shlWithOverflow requires an unsigned integer, found " ++ @TypeOf(src));
-
-    const T = @TypeOf(src);
-    const num = @shlWithOverflow(src, @as(std.math.Log2Int(T), @intCast(shift)));
-    return num[0];
-}
-
 const testing = std.testing;
 
 test "nthSetBitPos" {

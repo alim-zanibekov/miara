@@ -98,7 +98,7 @@ pub fn GenericBitArray(comptime T: type) type {
         }
 
         /// Appends `n` lsb of `data`, growing memory as needed
-        pub fn append(self: *Self, allocator: std.mem.Allocator, data: anytype, n: std.math.Log2IntCeil(@TypeOf(data))) MemError!void {
+        pub fn appendUInt(self: *Self, allocator: std.mem.Allocator, data: anytype, n: std.math.Log2IntCeil(@TypeOf(data))) MemError!void {
             if (@typeInfo(@TypeOf(data)) != .int or @typeInfo(@TypeOf(n)).int.signedness != .unsigned)
                 @compileError("BitArrayT.append requires an unsigned integer, found " ++ @TypeOf(data));
 
@@ -109,7 +109,7 @@ pub fn GenericBitArray(comptime T: type) type {
         }
 
         /// Appends `n` lsb of `data`, assuming capacity is sufficient
-        pub fn appendAssumeCapacity(self: *Self, data: anytype, n: std.math.Log2IntCeil(@TypeOf(data))) void {
+        pub fn appendUIntAssumeCapacity(self: *Self, data: anytype, n: std.math.Log2IntCeil(@TypeOf(data))) void {
             if (@typeInfo(@TypeOf(data)) != .int or @typeInfo(@TypeOf(n)).int.signedness != .unsigned)
                 @compileError("BitArrayT.append requires an unsigned integer, found " ++ @TypeOf(data));
 
