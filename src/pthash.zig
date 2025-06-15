@@ -270,6 +270,7 @@ pub fn GenericPTHash(
 
             var table = try bit.BitArray.initCapacity(allocator, table_size);
             defer table.deinit(allocator);
+            table.expandToCapacity();
             table.clearAll();
 
             var pilots = try allocator.alloc(u64, num_buckets + 2);

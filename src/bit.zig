@@ -6,69 +6,94 @@ pub const BitArray = GenericBitArray(usize);
 
 /// Returns a bit array type backed by the given unsigned integer type
 pub fn GenericBitArray(comptime T: type) type {
-    if (@typeInfo(T) != .int or @typeInfo(T).int.signedness != .unsigned)
-        @compileError("BitArrayT requires an unsigned integer as backing type, found " ++ @typeName(T));
+    if (!std.meta.hasUniqueRepresentation(T)) {
+        @compileError("GenericBitArray backing type must have no unused bits and padding, found " ++ @typeName(T));
+    }
 
     return struct {
         const Self = @This();
+        const BitArrayError = error{IndexOutOfBounds};
         const MemError = std.mem.Allocator.Error;
-        const Error = error{IndexOutOfBounds};
 
-        const TSize = usize;
+        const Size = usize;
 
-        data: std.ArrayListUnmanaged(T),
+        data: []T,
         /// Size in bits
-        bit_len: TSize,
-        /// Capacity in bits
-        capacity: TSize,
+        len: Size,
 
         /// Initializes an empty bit array with no allocation
         pub fn init() Self {
             return Self{
-                .data = std.ArrayListUnmanaged(T){},
-                .bit_len = 0,
-                .capacity = 0,
+                .data = &[_]T{},
+                .len = 0,
             };
         }
 
         /// Initializes a bit array with a given number of bits preallocated
-        pub fn initCapacity(allocator: std.mem.Allocator, num: TSize) MemError!Self {
-            var self = Self{
-                .data = std.ArrayListUnmanaged(T){},
-                .bit_len = 0,
-                .capacity = num,
+        pub fn initCapacity(allocator: std.mem.Allocator, capacity: Size) MemError!Self {
+            if (capacity == 0) return init();
+            const capacity_container = @divFloor(capacity - 1, @bitSizeOf(T)) + 1;
+            return Self{
+                .data = try allocator.alloc(T, capacity_container),
+                .len = 0,
             };
-            if (num == 0) return self;
-            try self.data.ensureTotalCapacity(allocator, (num - 1) / @bitSizeOf(T) + 1);
-            return self;
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.data.deinit(allocator);
+            allocator.free(self.data);
             self.* = undefined;
         }
 
-        inline fn appendHelper(
-            self: *Self,
-            data: anytype,
-            n: std.math.Log2IntCeil(@TypeOf(data)),
-            comptime Ctx: type,
-            ctx: Ctx,
-            comptime inc: fn (Ctx) MemError!void,
-        ) MemError!void {
-            var remaining = n;
-            while (remaining > 0) {
-                const buffer_pos = self.bit_len % @bitSizeOf(T);
-                const to_write = @min(@bitSizeOf(T) - buffer_pos, remaining);
-                const mask = ~@as(T, 0) >> @intCast(@as(u16, @bitSizeOf(T)) - to_write);
-                if (self.bit_len >= self.data.items.len * @bitSizeOf(T)) {
-                    try inc(ctx);
-                }
-                const value = @as(T, @intCast((data >> @intCast(remaining - to_write) & mask)));
-                self.data.items[self.data.items.len - 1] |= @intCast(value << @intCast(@as(u16, @bitSizeOf(T)) -| to_write -| buffer_pos));
+        pub fn expandToCapacity(self: *Self) void {
+            self.len = self.data.len * @bitSizeOf(T);
+        }
 
-                self.bit_len += to_write;
-                remaining -= to_write;
+        pub fn ensureCapacity(self: *Self, allocator: std.mem.Allocator, capacity: usize) !void {
+            const growth_factor = 2;
+            if (capacity > self.data.len * @bitSizeOf(T)) {
+                const capacity_container = @divFloor(capacity - 1, @bitSizeOf(T)) + 1;
+
+                const new_capacity = @max(capacity_container, self.data.len * growth_factor);
+                self.data = try allocator.realloc(self.data, new_capacity);
+            }
+        }
+
+        pub fn setRange(
+            self: *Self,
+            index: Size,
+            data: anytype,
+            from: std.math.IntFittingRange(0, @bitSizeOf(@TypeOf(data))),
+            to: std.math.IntFittingRange(0, @bitSizeOf(@TypeOf(data))),
+            endian: std.builtin.Endian,
+        ) void {
+            std.debug.assert(to >= from);
+            std.debug.assert((index + (to - from) - 1) / @bitSizeOf(T) + 1 <= self.data.len);
+            if (to == from) return;
+
+            const bytes = std.mem.asBytes(&data);
+            var i = from;
+            var pos = index;
+            while (i < to) {
+                const dst_shift: std.math.Log2Int(T) = @intCast(pos % @bitSizeOf(T));
+                const src_shift = i % 8;
+                const drop_last: u3 = @intCast((i + 8) -| to);
+                // @bitSizeOf(T) >= 8
+                const byte = switch (endian) {
+                    .big => bytes[i / 8],
+                    .little => bytes[bytes.len - 1 - (i / 8)],
+                };
+
+                const shl = std.math.shl;
+                const value: T = (@as(T, @intCast((shl(u8, byte, src_shift) >> drop_last) << drop_last)) << (@bitSizeOf(T) - 8)) >> dst_shift;
+                const mask: T = (@as(T, @intCast((shl(u8, @as(u8, 0xFF), src_shift) >> drop_last) << drop_last)) << (@bitSizeOf(T) - 8)) >> dst_shift;
+
+                std.debug.assert(mask != 0);
+
+                const j = pos / @bitSizeOf(T);
+                self.data[j] = (self.data[j] & ~mask) | value;
+
+                pos += @popCount(mask);
+                i += @intCast(@popCount(mask)); // max 8
             }
         }
 
@@ -77,16 +102,10 @@ pub fn GenericBitArray(comptime T: type) type {
             if (@typeInfo(@TypeOf(data)) != .int or @typeInfo(@TypeOf(n)).int.signedness != .unsigned)
                 @compileError("BitArrayT.append requires an unsigned integer, found " ++ @TypeOf(data));
 
-            const Ctx = struct { s: *Self, a: std.mem.Allocator };
-            var ctx = Ctx{ .a = allocator, .s = self };
-
-            try self.appendHelper(data, n, *Ctx, &ctx, struct {
-                pub fn func(c: *Ctx) MemError!void {
-                    try c.s.data.append(c.a, 0);
-                }
-            }.func);
-
-            self.capacity = self.data.items.len * 8;
+            const bitSize: Size = @bitSizeOf(@TypeOf(data));
+            try self.ensureCapacity(allocator, self.len + n);
+            self.setRange(self.len, data, @intCast(bitSize - n), bitSize, .little);
+            self.len += n;
         }
 
         /// Appends `n` lsb of `data`, assuming capacity is sufficient
@@ -94,83 +113,83 @@ pub fn GenericBitArray(comptime T: type) type {
             if (@typeInfo(@TypeOf(data)) != .int or @typeInfo(@TypeOf(n)).int.signedness != .unsigned)
                 @compileError("BitArrayT.append requires an unsigned integer, found " ++ @TypeOf(data));
 
-            self.appendHelper(data, n, *Self, self, struct {
-                pub fn func(s: *Self) MemError!void {
-                    s.data.items.len += 1;
-                    s.data.items[s.data.items.len - 1] = 0;
-                }
-            }.func) catch unreachable;
+            const bitSize: Size = @bitSizeOf(@TypeOf(data));
+            self.setRange(self.len, data, @intCast(bitSize - n), bitSize, .little);
+            self.len += n;
         }
 
         /// Sets all bits to zero
         pub fn clearAll(self: *Self) void {
-            self.data.items.len = self.data.capacity;
-            self.bit_len = self.capacity;
-            @memset(self.data.items, 0);
+            if (self.len == 0) return;
+            @memset(self.data[0..(@divFloor(self.len - 1, @bitSizeOf(T)) + 1)], 0);
         }
 
         /// Sets all bits to one
         pub fn setAll(self: *Self) void {
-            self.data.items.len = self.data.capacity;
-            self.bit_len = self.capacity;
-            @memset(self.data.items, std.math.maxInt(T));
+            if (self.len == 0) return;
+            @memset(self.data[0..(@divFloor(self.len - 1, @bitSizeOf(T)) + 1)], std.math.maxInt(T));
         }
 
-        /// Returns @bitSizeOf(U) bits starting at bit `index`
-        pub fn get(self: *const Self, comptime U: type, index: TSize) Error!U {
+        /// Returns @bitSizeOf(Out) bits starting at bit `index`
+        pub fn get(self: *const Self, comptime Out: type, index: Size) BitArrayError!Out {
+            if (@typeInfo(Out) != .int or @typeInfo(Out).int.signedness != .unsigned)
+                @compileError("BitArray.get requires an unsigned integer as a result type, found " ++ @typeName(Out));
+
+            const High = comptime if (@bitSizeOf(Out) > @bitSizeOf(T)) Out else T;
+            const align_shift = comptime if (@bitSizeOf(Out) > @bitSizeOf(T)) @bitSizeOf(Out) - @bitSizeOf(T) else 0;
+
             var i = index / @bitSizeOf(T);
             var k = index % @bitSizeOf(T);
-            if (@bitSizeOf(U) + index > self.bit_len) {
-                return Error.IndexOutOfBounds;
+
+            if (@bitSizeOf(Out) + index > self.len) {
+                return BitArrayError.IndexOutOfBounds;
             }
 
-            const Y = std.math.Log2IntCeil(U);
-            const aligh_shift = comptime if (@bitSizeOf(U) > @bitSizeOf(T)) @bitSizeOf(U) - @bitSizeOf(T) else 0;
-            const TMax = comptime if (@bitSizeOf(U) > @bitSizeOf(T)) U else T;
-
-            var remaining: Y = @bitSizeOf(U);
-            var result: U = 0;
+            const Log2T = std.math.Log2IntCeil(T);
+            const Log2High = std.math.Log2IntCeil(High);
+            var remaining: std.math.Log2IntCeil(Out) = @bitSizeOf(Out);
+            var result: Out = 0;
             while (remaining > 0) {
                 const to_write = @min(@bitSizeOf(T) - k, remaining);
-                const mask = bitops.shlWithOverflow(~@as(T, 0), @as(u16, @bitSizeOf(T)) - to_write);
-                const val: TMax = @intCast(bitops.shlWithOverflow(self.data.items[i], k) & mask);
-                result |= @intCast((val << aligh_shift) >> @intCast(@as(u16, @bitSizeOf(TMax)) - remaining));
+                const mask = std.math.shl(T, ~@as(T, 0), @as(Log2T, @bitSizeOf(T)) - to_write);
+                const val: High = @intCast(std.math.shl(T, self.data[i], k) & mask);
+                result |= @intCast((val << align_shift) >> @intCast(@as(Log2High, @bitSizeOf(High)) - remaining));
                 remaining -= to_write;
                 i += 1;
                 k = 0;
             }
-
             return result;
         }
 
         /// Returns `n` bits starting at bit `index` as `Out`
-        pub fn getN(self: *const Self, comptime Out: type, n: std.math.Log2IntCeil(Out), i: TSize) Error!Out {
+        pub fn getVar(self: *const Self, comptime Out: type, n: std.math.Log2IntCeil(Out), i: Size) BitArrayError!Out {
             return switch (n) {
                 inline 1...@bitSizeOf(Out) => |k| @intCast(try self.get(
                     std.meta.Int(.unsigned, k),
                     i,
                 )),
-                else => return Error.IndexOutOfBounds,
+                else => return BitArrayError.IndexOutOfBounds,
             };
         }
 
         /// True if bit at index `i` is set
-        pub fn isSet(self: *const Self, i: TSize) bool {
-            const item = self.data.items[i / @bitSizeOf(T)];
+        pub fn isSet(self: *const Self, i: Size) bool {
+            const item = self.data[i / @bitSizeOf(T)];
             return item & (@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - i % @bitSizeOf(T))) != 0;
         }
 
         /// Finds the next bit equal to `query` (0 or 1) starting from bit `start`
-        pub fn idxNext(self: *const BitArray, start: TSize, comptime query: u1) ?TSize {
-            if (start >= self.bit_len)
+        pub fn idxNext(self: *const BitArray, start: Size, comptime query: u1) ?Size {
+            if (start >= self.len)
                 return null;
 
             var i = start / @bitSizeOf(T);
             var k = start % @bitSizeOf(T);
-            while (i < self.data.items.len) {
-                const word = if (query == 1) self.data.items[i] else ~self.data.items[i];
 
-                const masked_word = bitops.shlWithOverflow(word, k) >> @intCast(k);
+            while (i < self.data.len) {
+                const word = if (query == 1) self.data[i] else ~self.data[i];
+
+                const masked_word = std.math.shl(T, word, k) >> @intCast(k);
                 if (masked_word != 0) {
                     const tz = @clz(masked_word);
                     const bit_index = i * @bitSizeOf(T) + tz;
@@ -184,15 +203,15 @@ pub fn GenericBitArray(comptime T: type) type {
         }
 
         /// Sets bit at index `i` to one
-        pub fn set(self: *Self, i: TSize) void {
-            self.data.items[i / @bitSizeOf(T)] =
-                self.data.items[i / @bitSizeOf(T)] | (@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - i % @bitSizeOf(T)));
+        pub fn set(self: *Self, i: Size) void {
+            self.data[i / @bitSizeOf(T)] =
+                self.data[i / @bitSizeOf(T)] | (@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - i % @bitSizeOf(T)));
         }
 
         /// Sets bit at index `i` to zero
-        pub fn clear(self: *Self, i: TSize) void {
-            self.data.items[i / @bitSizeOf(T)] =
-                self.data.items[i / @bitSizeOf(T)] & ~(@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - i % @bitSizeOf(T)));
+        pub fn clear(self: *Self, i: Size) void {
+            self.data[i / @bitSizeOf(T)] =
+                self.data[i / @bitSizeOf(T)] & ~(@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - i % @bitSizeOf(T)));
         }
     };
 }
@@ -207,7 +226,7 @@ test "bitArrayAppendAlloc" {
     const Y = usize;
 
     for (0..1000) |_| {
-        try c.append(std.testing.allocator, random.int(Y), @bitSizeOf(Y));
+        try c.appendUInt(std.testing.allocator, random.int(Y), @bitSizeOf(Y));
     }
 
     r = std.Random.DefaultPrng.init(seed);
@@ -228,28 +247,28 @@ test "bitArrayInitAlloc" {
     var r = std.Random.DefaultPrng.init(seed);
     var random = r.random();
 
-    const Y = usize;
-    var c = try BitArray.initCapacity(std.testing.allocator, n * @bitSizeOf(Y));
-    defer c.deinit(std.testing.allocator);
+    const T = usize;
+    var array = try BitArray.initCapacity(std.testing.allocator, n * @bitSizeOf(T));
+    defer array.deinit(std.testing.allocator);
 
-    var numbers = try std.ArrayList(Y).initCapacity(std.testing.allocator, n);
+    var numbers = try std.ArrayList(T).initCapacity(std.testing.allocator, n);
     defer numbers.deinit();
 
-    for (0..n) |_| numbers.appendAssumeCapacity(random.int(Y));
+    for (0..n) |_| numbers.appendAssumeCapacity(random.int(T));
 
     for (numbers.items) |x| {
-        const to_add = random.uintAtMost(u16, @bitSizeOf(Y) - 1) + 1;
-        const remaining = @bitSizeOf(Y) - to_add;
-        c.appendAssumeCapacity(x >> @intCast(remaining), @intCast(to_add));
+        const to_add = random.uintAtMost(u16, @bitSizeOf(T) - 1) + 1;
+        const remaining = @bitSizeOf(T) - to_add;
+        array.appendUIntAssumeCapacity(x >> @intCast(remaining), @intCast(to_add));
         if (remaining != 0) {
-            c.appendAssumeCapacity(x, @intCast(remaining));
+            array.appendUIntAssumeCapacity(x, @intCast(remaining));
         }
     }
 
-    for (0..(numbers.items.len * @bitSizeOf(Y))) |i| {
-        const number = numbers.items[i / @bitSizeOf(Y)];
-        const v = number & (@as(Y, 1) << @intCast(@bitSizeOf(Y) - 1 - (i % @bitSizeOf(Y)))) != 0;
-        try std.testing.expectEqual(v, c.isSet(i));
+    for (numbers.items, 0..) |number, pos| {
+        const i = pos * @bitSizeOf(T);
+        const v = number & (@as(T, 1) << @intCast(@bitSizeOf(T) - 1 - (i % @bitSizeOf(T)))) != 0;
+        try std.testing.expectEqual(v, array.isSet(i));
     }
 }
 
@@ -272,9 +291,9 @@ test "bitArrayCustomBufferType" {
             for (numbers.items) |x| {
                 const toAdd = random.uintAtMost(u16, @bitSizeOf(Y) - 1) + 1;
                 const remaining = @bitSizeOf(Y) - toAdd;
-                c.appendAssumeCapacity(x >> @intCast(remaining), @intCast(toAdd));
+                c.appendUIntAssumeCapacity(x >> @intCast(remaining), @intCast(toAdd));
                 if (remaining != 0) {
-                    c.appendAssumeCapacity(x, @intCast(remaining));
+                    c.appendUIntAssumeCapacity(x, @intCast(remaining));
                 }
             }
 
@@ -292,9 +311,8 @@ test "bitArrayCustomBufferType" {
         }
     }.func;
 
-    try testFn(u69, 0x3C0633A9CA);
-    try testFn(u3, 0x3C0633A9BA);
-    try testFn(u1, 0x3C0633A9C1);
+    try testFn(u8, 0x3C0633A9CA);
+    try testFn(u16, 0x3C0633A9BA);
+    try testFn(u32, 0x3C0633A9C1);
     try testFn(u64, 0x3C0633A9C2);
-    try testFn(u181, 0x3C0633A9C9);
 }
