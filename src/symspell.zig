@@ -233,6 +233,8 @@ pub fn GenericSymSpell(
             var count_sum: usize = 0;
             var count_max: u32 = 0;
 
+            var tm = util.TimeMasurer{};
+            tm.start();
             for (dict) |it| {
                 word_max_size = @max(word_max_size, it.word.len);
                 const len = strLen(ctx, it.word) orelse return error.GetWordLengthError;
@@ -245,6 +247,8 @@ pub fn GenericSymSpell(
                 count_sum += it.count;
                 count_max = @max(it.count, count_max);
             }
+
+            tm.loop("Dict stats calculation");
 
             return DictStats{
                 .edits_layer_num_max = edits_layer_num_max,
@@ -289,12 +293,19 @@ pub fn GenericSymSpell(
             Deduper: type,
             deduper: Deduper,
         ) !Self {
+            var tm = if (builtin.is_test) util.TimeMasurer{} else (struct {
+                pub inline fn start(_: *@This()) void {}
+                pub inline fn loop(_: *@This(), _: []const u8) void {}
+            }){};
+
             var arena_allocator = std.heap.ArenaAllocator.init(main_allocator);
             defer arena_allocator.deinit();
             const arena = arena_allocator.allocator();
 
+            tm.start();
             var word_edits = try std.ArrayListUnmanaged(WordEdit).initCapacity(arena, dict.len);
             var generator = try EditsGenerator([]const T, @TypeOf(deduper)).init(arena, dict_stats.word_max_size);
+
             for (dict, 0..) |it, i| {
                 try generator.load(it.word, wordMaxDistance(ctx, it.word), deduper);
                 while (generator.next()) {
@@ -307,6 +318,8 @@ pub fn GenericSymSpell(
                 }
             }
 
+            tm.loop("Deletes generation");
+
             std.mem.sort(WordEdit, word_edits.items, {}, struct {
                 fn func(_: void, a: WordEdit, b: WordEdit) bool {
                     const order = std.mem.order(T, a.edit, b.edit);
@@ -315,16 +328,25 @@ pub fn GenericSymSpell(
                 }
             }.func);
 
+            tm.loop("Word deletes sort");
+
             var unique: usize = 1;
             for (1..word_edits.items.len) |i| {
                 if (!std.mem.eql(T, word_edits.items[i].edit, word_edits.items[i - 1].edit)) unique += 1;
             }
 
+            tm.loop("Counting unique deletes");
+
             var iter = SortedEditsIterator{ .array = word_edits.items, .len = unique };
             var ph = try PTHash.build(main_allocator, @TypeOf(&iter), &iter, PTHash.buildConfig(iter.size(), .{
+                .lambda = 4.5,
                 .alpha = 0.97,
-                .minimal = true,
+                .max_bucket_size = 512,
+                // .minimal = true,
             }));
+
+            tm.loop("Build PTHash");
+
             errdefer ph.deinit(main_allocator);
 
             var word_edits_groups = try arena.alloc([]WordEdit, ph.size());
@@ -348,6 +370,8 @@ pub fn GenericSymSpell(
             }
             word_edits_groups[prev_idx] = word_edits.items[start_i..];
 
+            tm.loop("Group deletes");
+
             var edits_index = try (if (compressEdits) arena else main_allocator).alloc(u32, ph.size() + 1);
 
             const id_width = std.math.log2_int_ceil(usize, dict.len);
@@ -363,6 +387,8 @@ pub fn GenericSymSpell(
 
             @memset(edits_index, 0);
             if (!bitPackDictRefs) @memset(edits_values, 0);
+
+            tm.loop("Prepare buffers");
 
             var j: u32 = 0;
             var last_hash: u64 = 0;
@@ -382,7 +408,8 @@ pub fn GenericSymSpell(
                         return a.count > b.count;
                     }
                 }.func);
-                if (bitPackDictRefs) {
+
+                if (comptime bitPackDictRefs) {
                     edits_values.appendUIntAssumeCapacity(group[0].i_word, @intCast(id_width));
                 } else {
                     edits_values[j] = group[0].i_word;
@@ -390,7 +417,7 @@ pub fn GenericSymSpell(
                 j += 1;
                 for (1..group.len) |k| {
                     if (group[k].i_word == group[k - 1].i_word) continue;
-                    if (bitPackDictRefs) {
+                    if (comptime bitPackDictRefs) {
                         edits_values.appendUIntAssumeCapacity(group[k].i_word, @intCast(id_width));
                     } else {
                         edits_values[j] = group[k].i_word;
@@ -400,6 +427,8 @@ pub fn GenericSymSpell(
             }
             // enclosing element to simplify `getEditsIndexAndSize`
             for ((last_hash + 1)..(ph.size() + 1)) |i| edits_index[i] = j;
+
+            tm.loop("Build deletes index");
 
             if (compressEdits) {
                 var ef_iter = (struct {
@@ -416,11 +445,15 @@ pub fn GenericSymSpell(
                         self.i += 1;
                         return @intCast(res);
                     }
+
+                    pub fn reset(self: *@This()) void {
+                        self.i = 0;
+                    }
                 }){ .array = edits_index };
 
                 const edits_index_ef = try EliasFano.init(main_allocator, edits_index[edits_index.len - 1], @TypeOf(&ef_iter), &ef_iter);
                 // errdefer edits_index_ef.deinit(main_allocator);
-
+                tm.loop("Compress deletes index");
                 return Self{
                     .pthash = ph,
                     .edits_values = edits_values,
@@ -1350,7 +1383,7 @@ fn testDedupersLaunchCallback(n: u64, testFn: anytype) !void {
     try testFn(&no_dp, false);
 }
 
-test "EditsGeneration" {
+test "Edits generation" {
     const allocator = testing.allocator;
     const original_word = "wing";
     const word = "ww" ++ original_word;
@@ -1383,7 +1416,7 @@ test "EditsGeneration" {
     try testDedupersLaunchCallback(n, testFn);
 }
 
-test "EditsGenerationUTF8" {
+test "Edits generation | utf8" {
     const allocator = testing.allocator;
     const original_word = "💅💃:hat";
     const word = "💅💅" ++ original_word;
@@ -1420,10 +1453,8 @@ test "EditsGenerationUTF8" {
     try testDedupersLaunchCallback(n, testFn);
 }
 
-fn testSymSpellRandom(SymSpell2: type, n: comptime_int) !void {
+fn testSymSpellRandom(allocator: std.mem.Allocator, SymSpell2: type, n: comptime_int) !void {
     std.debug.assert(builtin.is_test);
-
-    const allocator = testing.allocator;
     var r = std.Random.DefaultPrng.init(0x4C27A681B1);
     const random = r.random();
 
@@ -1439,6 +1470,13 @@ fn testSymSpellRandom(SymSpell2: type, n: comptime_int) !void {
             .count = 1,
         };
     }
+
+    std.mem.sort(SymSpell2.Token, entries, {}, struct {
+        fn func(_: void, a: SymSpell2.Token, b: SymSpell2.Token) bool {
+            return std.mem.order(u8, a.word, b.word) == .lt;
+        }
+    }.func);
+
     const start = std.time.nanoTimestamp();
     var ss = try SymSpell2.initBloom(allocator, entries, {}, .{ .fp_rate = 0.01 });
     defer ss.deinit(allocator);
@@ -1458,12 +1496,12 @@ fn testSymSpellRandom(SymSpell2: type, n: comptime_int) !void {
     const to_segment = try std.mem.concat(allocator, u8, &.{ query, entries[1].word });
     defer allocator.free(to_segment);
 
-    const size_dict = util.calculateRuntimeSize(@TypeOf(entries), entries);
-    const size = util.calculateRuntimeSize(@TypeOf(ss), ss);
-    const size_search = util.calculateRuntimeSize(@TypeOf(searcher), searcher);
-    const size_pthash = util.calculateRuntimeSize(@TypeOf(ss.pthash), ss.pthash);
-    const size_edits_index = util.calculateRuntimeSize(@TypeOf(ss.edits_index), ss.edits_index);
-    const size_edits_values = util.calculateRuntimeSize(@TypeOf(ss.edits_values), ss.edits_values);
+    const size_dict = try util.calculateRuntimeSize(allocator, @TypeOf(entries), entries);
+    const size = try util.calculateRuntimeSize(allocator, @TypeOf(ss), ss);
+    const size_search = try util.calculateRuntimeSize(allocator, @TypeOf(searcher), searcher);
+    const size_pthash = try util.calculateRuntimeSize(allocator, @TypeOf(ss.pthash), ss.pthash);
+    const size_edits_index = try util.calculateRuntimeSize(allocator, @TypeOf(ss.edits_index), ss.edits_index);
+    const size_edits_values = try util.calculateRuntimeSize(allocator, @TypeOf(ss.edits_values), ss.edits_values);
 
     var hb = util.HumanBytes{};
     std.debug.print(
@@ -1508,19 +1546,19 @@ fn testSymSpellRandom(SymSpell2: type, n: comptime_int) !void {
 }
 
 test "SymSpell random ascii" {
-    const n = 5000;
+    const n = 15000;
     std.debug.print("\n---- SymSpell: random {} ascii words ----\n\n", .{n});
     const SymSpell2 = SymSpell([]const u8, void, struct {
         fn func(_: void, _: []const u8) usize {
             return 2;
         }
     }.func);
-    try testSymSpellRandom(SymSpell2, n);
+    try testSymSpellRandom(testing.allocator, SymSpell2, n);
 }
 
-test "SymSpell random ascii uncompressed exits index" {
-    const n = 5000;
-    std.debug.print("\n---- SymSpell: random {} ascii words, uncompressed exits index ----\n\n", .{n});
+test "SymSpell random ascii uncompressed edits index" {
+    const n = 15000;
+    std.debug.print("\n---- SymSpell: random {} ascii words, uncompressed edits index ----\n\n", .{n});
     const Func = struct {
         inline fn editDistanceBuffer(_: void, buffer: []u32, word1: []const u8, word2: []const u8) u32 {
             return levenshteinDistance(u8, u32, buffer, word1, word2);
@@ -1532,7 +1570,7 @@ test "SymSpell random ascii uncompressed exits index" {
             return 2;
         }
     };
-    try testSymSpellRandom(GenericSymSpell(
+    try testSymSpellRandom(testing.allocator, GenericSymSpell(
         []const u8,
         void,
         Func.editDistanceBuffer,

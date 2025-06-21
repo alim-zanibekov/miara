@@ -496,7 +496,7 @@ test "PTHash" {
     }
     try testing.expect(count == n);
 
-    const size = util.calculateRuntimeSize(@TypeOf(res), res);
+    const size = try util.calculateRuntimeSize(allocator, @TypeOf(res), res);
 
     var hb = util.HumanBytes{};
 
