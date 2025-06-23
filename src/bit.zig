@@ -10,6 +10,8 @@ pub fn GenericBitArray(comptime T: type) type {
     }
 
     return struct {
+        pub const Type = T;
+
         const Self = @This();
         const BitArrayError = error{IndexOutOfBounds};
         const MemError = std.mem.Allocator.Error;
@@ -82,9 +84,8 @@ pub fn GenericBitArray(comptime T: type) type {
                     .little => bytes[bytes.len - 1 - (i / 8)],
                 };
 
-                const shl = std.math.shl;
-                const value: T = (@as(T, @intCast((shl(u8, byte, src_shift) >> drop_last) << drop_last)) << (@bitSizeOf(T) - 8)) >> dst_shift;
-                const mask: T = (@as(T, @intCast((shl(u8, @as(u8, 0xFF), src_shift) >> drop_last) << drop_last)) << (@bitSizeOf(T) - 8)) >> dst_shift;
+                const value: T = (@as(T, @intCast((shl(byte, src_shift) >> drop_last) << drop_last)) << (@bitSizeOf(T) - 8)) >> dst_shift;
+                const mask: T = (@as(T, @intCast((shl(@as(u8, 0xFF), src_shift) >> drop_last) << drop_last)) << (@bitSizeOf(T) - 8)) >> dst_shift;
 
                 std.debug.assert(mask != 0);
 
@@ -150,14 +151,28 @@ pub fn GenericBitArray(comptime T: type) type {
             var result: Out = 0;
             while (remaining > 0) {
                 const to_write = @min(@bitSizeOf(T) - k, remaining);
-                const mask = std.math.shl(T, ~@as(T, 0), @as(Log2T, @bitSizeOf(T)) - to_write);
-                const val: High = @intCast(std.math.shl(T, self.data[i], k) & mask);
+                const mask = shl(~@as(T, 0), @as(Log2T, @bitSizeOf(T)) - to_write);
+                const val: High = @intCast(shl(self.data[i], k) & mask);
                 result |= @intCast((val << align_shift) >> @intCast(@as(Log2High, @bitSizeOf(High)) - remaining));
                 remaining -= to_write;
                 i += 1;
                 k = 0;
             }
             return result;
+        }
+
+        /// Returns `n` bits starting at bit `index` as `T`
+        pub fn getVarFast(self: *const Self, index: Size, n: std.math.Log2IntCeil(T)) T {
+            std.debug.assert(n <= @bitSizeOf(T));
+
+            const i = index / @bitSizeOf(T);
+            const k = index % @bitSizeOf(T);
+            const mask: T = ~@as(T, 0) >> @intCast(k);
+            if (k + n <= @bitSizeOf(T)) {
+                return (self.data[i] & mask) >> @intCast(@bitSizeOf(T) - (k + n));
+            } else {
+                return ((self.data[i] & mask) << @intCast((k + n) - @bitSizeOf(T))) | (self.data[i + 1] >> @intCast(@bitSizeOf(T) * 2 - (k + n)));
+            }
         }
 
         /// Returns `n` bits starting at bit `index` as `Out`
@@ -178,7 +193,7 @@ pub fn GenericBitArray(comptime T: type) type {
         }
 
         /// Finds the next bit equal to `query` (0 or 1) starting from bit `start`
-        pub fn idxNext(self: *const BitArray, start: Size, comptime query: u1) ?Size {
+        pub fn idxNext(self: *const Self, start: Size, comptime query: u1) ?Size {
             if (start >= self.len)
                 return null;
 
@@ -215,33 +230,81 @@ pub fn GenericBitArray(comptime T: type) type {
     };
 }
 
+pub inline fn shl(it: anytype, n: usize) @TypeOf(it) {
+    if (n >= @bitSizeOf(@TypeOf(it))) return 0;
+    return @shlWithOverflow(it, @as(std.math.Log2Int(@TypeOf(it)), @intCast(n)))[0];
+}
+
 pub const NthSetBitError = error{ InvalidN, NotFound };
+
+const testing = std.testing;
 
 /// Returns the index (0-based, from msb) of the n-th set bit in `src`
 /// Requires `src` to be an unsigned integer
 pub fn nthSetBitPos(src: anytype, n: std.math.Log2IntCeil(@TypeOf(src))) NthSetBitError!std.math.Log2Int(@TypeOf(src)) {
     const T = @TypeOf(src);
-    if (@typeInfo(T) != .int or @typeInfo(T).int.signedness != .unsigned)
+    const info = @typeInfo(T);
+    if (info != .int or info.int.signedness != .unsigned)
         @compileError("nthSetBitPos requires an unsigned integer, found " ++ @typeName(T));
 
-    if (n == 0 or n > @typeInfo(T).int.bits) {
-        return NthSetBitError.InvalidN;
-    }
+    if (n == 0 or n > info.int.bits) return NthSetBitError.InvalidN;
 
-    var count: usize = 0;
-    inline for (0..@typeInfo(T).int.bits) |i| {
-        if (src & (@as(T, 1) << @intCast(@typeInfo(T).int.bits - 1 - i)) > 0) {
-            count += 1;
-            if (count == n) {
-                return @intCast(i);
+    if (comptime info.int.bits > 8 and std.math.isPowerOfTwo(info.int.bits)) {
+        var bits = @bitReverse(src);
+        var count: usize = n;
+        for (0..(info.int.bits / 8)) |i| {
+            const b = @popCount(bits & 0xff);
+            if (count <= b) {
+                const byte: u8 = @intCast(bits & 0xff);
+                for (0..8) |j| {
+                    if (byte >> @intCast(j) & 1 == 1) {
+                        count -= 1;
+                        if (count == 0) return @intCast((i << 3) + j);
+                    }
+                    bits >>= 1;
+                }
+            } else {
+                count -= b;
+                bits >>= 8;
             }
         }
+
+        return error.NotFound;
+    }
+
+    var bits = @bitReverse(src);
+    var count: usize = n;
+    inline for (0..info.int.bits) |i| {
+        if (bits & 1 == 1) {
+            count -= 1;
+            if (count == 0) return @intCast(i);
+        }
+        bits >>= 1;
     }
 
     return error.NotFound;
 }
 
-const testing = std.testing;
+test nthSetBitPos {
+    const expectEqual = std.testing.expectEqual;
+    const expectError = std.testing.expectError;
+
+    try expectEqual(3, try nthSetBitPos(@as(u8, 0b00010110), 1));
+    try expectEqual(5, try nthSetBitPos(@as(u8, 0b00010110), 2));
+    try expectEqual(6, try nthSetBitPos(@as(u8, 0b00010110), 3));
+
+    try expectEqual(0, try nthSetBitPos(@as(u64, 1) << 63, 1));
+
+    try expectEqual(63, try nthSetBitPos(@as(u64, 1), 1));
+
+    for (1..65) |n| {
+        try expectEqual(n - 1, try nthSetBitPos(~@as(u64, 0), @intCast(n)));
+    }
+
+    try expectError(NthSetBitError.InvalidN, nthSetBitPos(@as(u8, 0b10110), 0));
+    try expectError(NthSetBitError.NotFound, nthSetBitPos(@as(u8, 0b10110), 4));
+    try expectError(NthSetBitError.NotFound, nthSetBitPos(@as(u64, 0), 1));
+}
 
 test "bitArrayAppendAlloc" {
     const seed = 0x224740f963;
