@@ -284,7 +284,7 @@ pub fn GenericWidow(
             inline for (&ss.strides, 0..) |block, i| ss.strides_div[i] = fastdivPrecompute(block);
 
             inline for (&ss.strides, 0..) |stride, i| {
-                ss.table[i] = try allocator.alloc(SelectLevelTypes[i], if (num_set == 0) 2 else ((num_set - 1) / stride) + 2);
+                ss.table[i] = try allocator.alloc(SelectLevelTypes[i], if (num_set == 0) 2 else ((num_set - 1) / stride + 1) + 2);
                 ss.table[i][0] = 0;
                 ss.table[i][ss.table[i].len - 1] = 0;
             }
