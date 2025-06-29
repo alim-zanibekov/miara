@@ -1,7 +1,7 @@
 const std = @import("std");
 
-/// BitArray backed by usize slice
-pub const BitArray = GenericBitArray(usize);
+/// BitArray backed by u64 slice
+pub const BitArray = GenericBitArray(u64);
 
 /// Returns a bit array type backed by the given unsigned integer type
 pub fn GenericBitArray(comptime T: type) type {
@@ -45,10 +45,12 @@ pub fn GenericBitArray(comptime T: type) type {
             self.* = undefined;
         }
 
+        /// Expands the bit array to use all available capacity without reallocation
         pub fn expandToCapacity(self: *Self) void {
             self.len = self.data.len * @bitSizeOf(T);
         }
 
+        /// Ensures the bit array can hold at least the specified capacity, reallocating if needed
         pub fn ensureCapacity(self: *Self, allocator: std.mem.Allocator, capacity: usize) !void {
             const growth_factor = 2;
             if (capacity > self.data.len * @bitSizeOf(T)) {
@@ -59,6 +61,7 @@ pub fn GenericBitArray(comptime T: type) type {
             }
         }
 
+        /// Sets a range of bits from the source data with specified bit boundaries and endianness
         pub fn setRange(
             self: *Self,
             index: Size,
@@ -121,7 +124,7 @@ pub fn GenericBitArray(comptime T: type) type {
         /// Sets all bits to zero
         pub fn clearAll(self: *Self) void {
             if (self.len == 0) return;
-            @memset(self.data[0..(@divFloor(self.len - 1, @bitSizeOf(T)) + 1)], 0);
+            @memset(self.data[0..((self.len - 1) / @bitSizeOf(T) + 1)], 0);
         }
 
         /// Sets all bits to one

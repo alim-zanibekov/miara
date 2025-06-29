@@ -120,20 +120,28 @@ pub fn GenericEliasFano(T: type, EnableGEQ: bool, PrefixSumMode: bool) type {
         /// Returns the i-th element of the array regardless of PrefixSumMode
         pub fn getValue(self: *const Self, i: usize) !T {
             const h_bits = try self.higher_bits_lookup.select1(i + 1) - i;
-            const l_bits = if (self.low_n > 0) try self.lower_bits.getVar(T, @intCast(self.low_n), self.low_n * i) else 0;
+            const l_bits = lb: {
+                if (self.low_n == 0) break :lb 0;
+                if (comptime @bitSizeOf(T) <= @bitSizeOf(BitArray.Type)) {
+                    break :lb self.lower_bits.getVarFast(self.low_n * i, @intCast(self.low_n));
+                } else {
+                    break :lb try self.lower_bits.getVar(T, @intCast(self.low_n), self.low_n * i);
+                }
+            };
             return (h_bits << @intCast(self.low_n)) | l_bits;
         }
 
         /// Returns the difference between the i + 1-th and i-th elements of the array
         pub fn getDiff(self: *const Self, i: usize) !T {
             const l_bits_1, const l_bits_2 = lb: {
+                if (self.low_n == 0) break :lb .{ 0, 0 };
                 if (comptime @bitSizeOf(T) <= @bitSizeOf(BitArray.Type)) {
                     const l_bits_1 = self.lower_bits.getVarFast(self.low_n * i, @intCast(self.low_n));
                     const l_bits_2 = self.lower_bits.getVarFast(self.low_n * (i + 1), @intCast(self.low_n));
                     break :lb .{ l_bits_1, l_bits_2 };
                 } else {
-                    const l_bits_1 = if (self.low_n > 0) try self.lower_bits.getVar(T, @intCast(self.low_n), self.low_n * i) else 0;
-                    const l_bits_2 = if (self.low_n > 0) try self.lower_bits.getVar(T, @intCast(self.low_n), self.low_n * (i + 1)) else 0;
+                    const l_bits_1 = try self.lower_bits.getVar(T, @intCast(self.low_n), self.low_n * i);
+                    const l_bits_2 = try self.lower_bits.getVar(T, @intCast(self.low_n), self.low_n * (i + 1));
                     break :lb .{ l_bits_1, l_bits_2 };
                 }
             };
@@ -141,16 +149,8 @@ pub fn GenericEliasFano(T: type, EnableGEQ: bool, PrefixSumMode: bool) type {
             const h_bits_1 = try self.higher_bits_lookup.select1(i + 1);
             const h_bits_2 = self.higher_bits.idxNext(h_bits_1 + 1, 1) orelse return error.NotFound;
 
-            if ((i + 1) > h_bits_2) {
-                @breakpoint();
-            }
-
             const v1 = ((h_bits_1 - i) << @intCast(self.low_n) | l_bits_1);
             const v2 = ((h_bits_2 - i - 1) << @intCast(self.low_n) | l_bits_2);
-
-            if (v1 > v2) {
-                @breakpoint();
-            }
 
             return v2 - v1;
         }
