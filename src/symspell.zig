@@ -109,6 +109,8 @@ pub fn GenericSymSpell(
     const PTHash = pthash.PTHash([]const T, pthash.OptimalMapper(u64));
     const EliasFano = ef.EliasFano;
 
+    const debug_stats = builtin.is_test;
+
     return struct {
         const Self = @This();
 
@@ -233,7 +235,11 @@ pub fn GenericSymSpell(
             var count_sum: usize = 0;
             var count_max: u32 = 0;
 
-            var tm = util.TimeMasurer{};
+            var tm = if (debug_stats) util.TimeMasurer{} else (struct {
+                pub inline fn start(_: *@This()) void {}
+                pub inline fn loop(_: *@This(), _: []const u8) void {}
+            }){};
+
             tm.start();
             for (dict) |it| {
                 word_max_size = @max(word_max_size, it.word.len);
@@ -293,7 +299,7 @@ pub fn GenericSymSpell(
             Deduper: type,
             deduper: Deduper,
         ) !Self {
-            var tm = if (builtin.is_test) util.TimeMasurer{} else (struct {
+            var tm = if (debug_stats) util.TimeMasurer{} else (struct {
                 pub inline fn start(_: *@This()) void {}
                 pub inline fn loop(_: *@This(), _: []const u8) void {}
             }){};
@@ -339,7 +345,7 @@ pub fn GenericSymSpell(
 
             var iter = SortedEditsIterator{ .array = word_edits.items, .len = unique };
             var ph = try PTHash.build(main_allocator, @TypeOf(&iter), &iter, PTHash.buildConfig(iter.size(), .{
-                .lambda = 4.5,
+                .lambda = 6,
                 .alpha = 0.97,
                 .max_bucket_size = 512,
                 // .minimal = true,
@@ -395,7 +401,7 @@ pub fn GenericSymSpell(
             for (word_edits_groups, 0..) |group, hash| {
                 if (group.len == 0) {
                     // for EliasFano
-                    edits_index[hash] = edits_index[last_hash];
+                    edits_index[hash] = j;
                     continue;
                 }
                 last_hash = hash;
@@ -617,6 +623,7 @@ pub fn GenericSymSpell(
                         const gen_token = self.generator.getValue();
                         const hash = try self.sym_spell.pthash.get(gen_token);
                         const ias = try self.sym_spell.getEditsIndexAndSize(hash);
+                        if (ias.size == 0) continue;
                         {
                             const word_i = if (bitPackDictRefs)
                                 try self.sym_spell.edits_values.getVar(usize, id_width, ias.index * id_width)
