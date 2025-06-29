@@ -386,7 +386,7 @@ pub fn GenericPTHash(
 /// Parameter struct with defaults for PTHash wrapper
 pub const PTHashParams = struct {
     /// Average bucket size
-    lambda: f64 = 3.5,
+    lambda: f64 = 6,
     /// Load factor
     alpha: f64 = 0.97,
     /// Whether to build a minimal perfect hash
@@ -418,9 +418,7 @@ pub fn PTHash(
             const max_bucket_size = params.max_bucket_size;
 
             const num_buckets: usize = params.num_buckets orelse nb: {
-                const c = params.lambda;
-                const d: f64 = @log2(toF64(num_keys)) + 1.0;
-                break :nb @intFromFloat(@ceil(c * toF64(num_keys) / d));
+                break :nb @intFromFloat(toF64(num_keys) / params.lambda);
             };
 
             const mapper = mp: {
