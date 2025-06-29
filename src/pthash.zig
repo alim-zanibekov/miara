@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const bit = @import("bit.zig");
 const ef = @import("ef.zig");
 const util = @import("util.zig");
@@ -196,6 +197,7 @@ pub fn GenericPTHash(
 
             var l_seed: Seed = undefined;
             try std.posix.getrandom(std.mem.asBytes(&l_seed));
+            if (builtin.is_test) std.debug.print("PTHash random seed {}\n", .{l_seed});
             return buildSeed(allocator, KeyIterator, keys, config, l_seed);
         }
 
@@ -235,7 +237,7 @@ pub fn GenericPTHash(
 
             const max_bucket_size = config.max_bucket_size;
             const num_buckets = config.mapper.numBuckets();
-            var table_size: usize = @intFromFloat(@ceil(@as(f64, @floatFromInt(keys.size())) / config.alpha));
+            var table_size: usize = @intFromFloat(@ceil(@as(f64, @floatFromInt(keys.size())) / config.alpha + 1));
             if (table_size & (table_size - 1) == 0) table_size += 1;
 
             const BucketList = std.ArrayListUnmanaged(Bucket);
@@ -289,7 +291,7 @@ pub fn GenericPTHash(
             table.expandToCapacity();
             table.clearAll();
 
-            var pilots = try allocator.alloc(u64, num_buckets);
+            var pilots = try allocator.alloc(u64, num_buckets + 1);
             defer allocator.free(pilots);
             @memset(pilots, 0);
 
@@ -479,15 +481,15 @@ test "PTHash" {
     var iter = iterator.SliceIterator([]const u8).init(data);
     const PTHashT = PTHash([]const u8, OptimalMapper(u64));
     var res = try PTHashT.buildSeed(allocator, @TypeOf(&iter), &iter, PTHashT.buildConfig(iter.size(), .{
-        .lambda = 3,
+        .lambda = 6,
         .alpha = 0.97,
         .minimal = false,
     }), 42);
 
     defer res.deinit(allocator);
     const diff = std.time.nanoTimestamp() - start;
-
-    std.debug.print("Build: ns per key: {d:.2}\n", .{toF64(diff) / toF64(data.len)});
+    var ht = util.HumanTime{};
+    std.debug.print("Build: {s} per key\n", .{ht.fmt(@divFloor(diff, iter.size()))});
 
     var seen = try testing.allocator.alloc(bool, res.table_size);
     defer testing.allocator.free(seen);
