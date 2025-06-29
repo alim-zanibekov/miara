@@ -42,15 +42,16 @@ pub fn SkewedMapper(Hash: type) type {
 
         num_buckets: usize,
         num_keys: usize,
-        p1: usize,
-        p2: usize,
+        p1: u64,
+        p2: u64,
 
         pub fn init(num_keys: usize, num_buckets: usize) Self {
+            const p1: u64 = @intFromFloat(a * toF64(num_buckets));
             return .{
                 .num_buckets = num_buckets,
                 .num_keys = num_keys,
-                .p1 = @intFromFloat(a * toF64(num_keys)),
-                .p2 = @intFromFloat(b * toF64(num_buckets)),
+                .p1 = p1,
+                .p2 = num_buckets - p1,
             };
         }
 
@@ -61,8 +62,8 @@ pub fn SkewedMapper(Hash: type) type {
         pub fn getBucket(self: Self, hash: Hash) usize {
             // S1 = { x | (h(x, seed) mod n) < p1 }
             // res = if (h(x, seed) ∈ S1) h(x, seed) mod p2 else p2 + h(x, seed) mod (m - p2)
-            const s1Top = hash % self.num_buckets;
-            return if (s1Top < self.p1) hash % self.p2 else self.p2 + (hash % (self.num_buckets - self.p2));
+            const p1_top: Hash = comptime @intFromFloat(toF64(std.math.maxInt(Hash)) * b);
+            return if (hash < p1_top) hash % self.p1 else self.p1 + (hash % self.p2);
         }
     };
 }
@@ -103,12 +104,27 @@ pub fn OptimalMapper(Hash: type) type {
 }
 
 /// Default hasher for string-like keys using Wyhash and Murmur
-pub fn DefaultHasher(comptime Key: type) type {
+pub fn DefaultStringHasher(comptime Key: type) type {
     if (!util.isStringSlice(Key)) @compileError("Unsupported string type " ++ @typeName(Key));
 
     return struct {
         pub fn hashKey(_: @This(), seed: u64, key: Key) u64 {
             return std.hash.Wyhash.hash(seed, std.mem.sliceAsBytes(key));
+        }
+
+        pub fn hashPilot(_: @This(), seed: u64, pilot: usize) u64 {
+            return std.hash.murmur.Murmur2_64.hashWithSeed(std.mem.asBytes(&pilot), seed);
+        }
+    };
+}
+
+/// Default hasher for int keys using Murmur
+pub fn DefaultNumberHasher(comptime Key: type) type {
+    if (@typeInfo(Key) != .int) @compileError("Unsupported int type " ++ @typeName(Key));
+
+    return struct {
+        pub fn hashKey(_: @This(), seed: u64, key: Key) u64 {
+            return std.hash.murmur.Murmur2_64.hashWithSeed(std.mem.asBytes(&key), seed);
         }
 
         pub fn hashPilot(_: @This(), seed: u64, pilot: usize) u64 {
@@ -160,7 +176,7 @@ pub fn GenericPTHash(
         num_keys: usize,
         table_size: usize,
         config: PTHashConfig(Mapper, Hasher),
-        pilots: ef.EliasFano,
+        pilots: ef.EliasFanoPS,
         free_slots: ?ef.EliasFano,
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
@@ -273,7 +289,7 @@ pub fn GenericPTHash(
             table.expandToCapacity();
             table.clearAll();
 
-            var pilots = try allocator.alloc(u64, num_buckets + 2);
+            var pilots = try allocator.alloc(u64, num_buckets);
             defer allocator.free(pilots);
             @memset(pilots, 0);
 
@@ -282,6 +298,8 @@ pub fn GenericPTHash(
             for (0..config.hashed_pilot_cache_size) |i| hashedPilotsCache[i] = config.hasher.hashPilot(seed, i);
 
             for (buckets_by_size) |buckets| {
+                if (buckets.items.len == 0) continue;
+
                 for (buckets.items) |bucket| {
                     var pilot: u64 = 0;
                     pilot_search: while (true) : (pilot += 1) {
@@ -303,19 +321,15 @@ pub fn GenericPTHash(
                             if (positions.items[j - 1] == positions.items[j]) continue :pilot_search;
                         }
 
-                        pilots[bucket.bucket + 1] = pilot;
+                        pilots[bucket.bucket] = pilot;
                         for (positions.items) |p| table.set(p);
                         break;
                     }
                 }
             }
 
-            for (1..pilots.len) |j| {
-                pilots[j] += pilots[j - 1];
-            }
-
             var iter_pilots = iterator.SliceIterator(u64).init(pilots);
-            var enc_pilots = try ef.EliasFano.init(allocator, pilots[pilots.len - 1], @TypeOf(&iter_pilots), &iter_pilots);
+            var enc_pilots = try ef.EliasFanoPS.init(allocator, 0, @TypeOf(&iter_pilots), &iter_pilots);
             errdefer enc_pilots.deinit(allocator);
 
             var enc_free_slots: ?ef.EliasFano = null;
@@ -358,7 +372,7 @@ pub fn GenericPTHash(
         pub fn get(self: *const Self, key: Key) !u64 {
             const hash = self.config.hasher.hashKey(self.seed, key);
             const bucket = self.config.mapper.getBucket(hash);
-            const pilot = try self.pilots.get(bucket + 1) - try self.pilots.get(bucket);
+            const pilot: u64 = try self.pilots.get(bucket);
             const hashed_pilot = self.config.hasher.hashPilot(self.seed, pilot);
             const p = (hash ^ hashed_pilot) % self.table_size;
             if (self.config.minimal and p >= self.num_keys) {
@@ -394,7 +408,7 @@ pub fn PTHash(
         @compileError("Unknown mapper " ++ @typeInfo(Mapper) ++ ", please use GenericPTHash");
     }
     const Seed = u64;
-    const Hasher = DefaultHasher(Key);
+    const Hasher = if (@typeInfo(Key) == .int) DefaultNumberHasher(Key) else DefaultStringHasher(Key);
     const T = GenericPTHash(Seed, u64, Key, Mapper, Hasher);
 
     return struct {
@@ -423,7 +437,7 @@ pub fn PTHash(
                 .hashed_pilot_cache_size = params.hashed_pilot_cache_size,
                 .max_bucket_size = max_bucket_size,
                 .mapper = mapper,
-                .hasher = DefaultHasher(Key){},
+                .hasher = Hasher{},
             };
         }
 
@@ -467,7 +481,7 @@ test "PTHash" {
     var iter = iterator.SliceIterator([]const u8).init(data);
     const PTHashT = PTHash([]const u8, OptimalMapper(u64));
     var res = try PTHashT.buildSeed(allocator, @TypeOf(&iter), &iter, PTHashT.buildConfig(iter.size(), .{
-        .lambda = 3.5,
+        .lambda = 3,
         .alpha = 0.97,
         .minimal = false,
     }), 42);
@@ -475,7 +489,7 @@ test "PTHash" {
     defer res.deinit(allocator);
     const diff = std.time.nanoTimestamp() - start;
 
-    std.debug.print("Build: ns per key: {d:.2}\n\n", .{toF64(diff) / toF64(data.len)});
+    std.debug.print("Build: ns per key: {d:.2}\n", .{toF64(diff) / toF64(data.len)});
 
     var seen = try testing.allocator.alloc(bool, res.table_size);
     defer testing.allocator.free(seen);
