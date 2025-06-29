@@ -107,7 +107,7 @@ pub fn GenericSymSpell(
     };
 
     const PTHash = pthash.PTHash([]const T, pthash.OptimalMapper(u64));
-    const EliasFano = ef.GenericEliasFano(u64);
+    const EliasFano = ef.EliasFano;
 
     return struct {
         const Self = @This();

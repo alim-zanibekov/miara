@@ -15,6 +15,24 @@ pub fn Iterator(T: type) type {
     };
 }
 
+/// Defines a reusable forward `Iterator` interface for a given element type `T`
+/// Intended only as a comptime reference for `interface.zig` -> `checkImplements`
+pub fn ReusableIterator(T: type) type {
+    return struct {
+        pub fn size(_: *const @This()) usize {
+            unreachable;
+        }
+
+        pub fn next(_: *@This()) ?T {
+            unreachable;
+        }
+
+        pub fn reset(_: *@This()) void {
+            unreachable;
+        }
+    };
+}
+
 /// Defines a `RandomAccessIterator` interface supporting indexing, movement, and reverse iteration
 /// Intended only as a comptime reference for `interface.zig` -> `checkImplements`
 pub fn RandomAccessIterator(T: type) type {
