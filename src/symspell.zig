@@ -310,7 +310,7 @@ pub fn GenericSymSpell(
 
             tm.start();
             var word_edits = try std.ArrayListUnmanaged(WordEdit).initCapacity(arena, dict.len);
-            var generator = try EditsGenerator([]const T, @TypeOf(deduper)).init(arena, dict_stats.word_max_size);
+            var generator = try EditsGenerator(Word, @TypeOf(deduper)).init(arena, dict_stats.word_max_size);
 
             for (dict, 0..) |it, i| {
                 try generator.load(it.word, wordMaxDistance(ctx, it.word), deduper);
@@ -486,7 +486,7 @@ pub fn GenericSymSpell(
                 sym_spell: *const Self,
                 word: []const T,
                 seen: std.AutoHashMap(u32, void),
-                generator: EditsGenerator([]const T, EditsDeduper),
+                generator: EditsGenerator(Word, EditsDeduper),
                 len: usize,
                 max_distance: usize,
                 hit: Hit,
@@ -497,7 +497,7 @@ pub fn GenericSymSpell(
 
                 /// Allocates the search buffers and internal state
                 pub fn init(sym_spell: *const Self, allocator: std.mem.Allocator) !@This() {
-                    const generator = try EditsGenerator([]const T, EditsDeduper)
+                    const generator = try EditsGenerator(Word, EditsDeduper)
                         .init(
                         allocator,
                         sym_spell.dict_stats.word_max_size + sym_spell.dict_stats.max_distance * 4, // * 4 in case of utf8
