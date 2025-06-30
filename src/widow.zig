@@ -1,28 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const fd = @import("fastd.zig");
 const util = @import("util.zig");
 const bit = @import("bit.zig");
-
-inline fn fastdivPrecompute(divisor: u64) u128 {
-    return (~@as(u128, 0) / @as(u128, divisor)) + 1;
-}
-
-inline fn fastdiv(dividend: u64, precomputed: u128) u64 {
-    const bottom_half = ((precomputed & ~@as(u64, 0)) * @as(u128, dividend)) >> 64;
-    const top_half = (precomputed >> 64) * @as(u128, dividend);
-    return @intCast((bottom_half + top_half) >> 64);
-}
-
-inline fn fastmod(dividend: u64, precomputed: u128, divisor: u64) u64 {
-    const p = precomputed *% @as(u128, dividend);
-    return fastdiv(divisor, p);
-}
-
-pub fn PowerOf2Int(comptime T: type) type {
-    const info = @typeInfo(T).int;
-    const bits = std.math.ceilPowerOfTwo(u64, info.bits) catch unreachable;
-    return std.meta.Int(info.signedness, bits);
-}
 
 /// Full-featured. Select and rank support
 pub const Widow = GenericWidow(u64, true, true, &[_]u64{ 1 << 16, 1 << 9 }, &[_]usize{ 1 << 16, 1 << 9 }, true, false);
@@ -74,6 +54,7 @@ pub fn GenericWidow(
     for (RankLevels) |it| if (!std.math.isPowerOfTwo(it)) @compileError("RankLevels values must be powers of two");
 
     const RankSelectDivisor = @bitSizeOf(T) / 2;
+    const PowerOf2Int = util.PowerOf2Int;
 
     return struct {
         const Self = @This();
@@ -112,7 +93,7 @@ pub fn GenericWidow(
 
         pub const SelectSupport = struct {
             strides: [SelectLevels.len]usize,
-            strides_div: [SelectLevels.len]u128,
+            strides_div: [SelectLevels.len]fd.MagicU64,
             table: SelectTable,
             size: BitSize,
 
@@ -263,7 +244,7 @@ pub fn GenericWidow(
             var ss = SelectSupport{
                 .table = .{&.{}} ** n_select,
                 .strides = .{0} ** n_select,
-                .strides_div = .{0} ** n_select,
+                .strides_div = .{fd.MagicU64{0}} ** n_select,
                 .size = num_set,
             };
             errdefer ss.deinit(allocator);
@@ -283,7 +264,7 @@ pub fn GenericWidow(
                 @memcpy(&ss.strides, SelectLevels);
             }
 
-            inline for (&ss.strides, 0..) |block, i| ss.strides_div[i] = fastdivPrecompute(block);
+            inline for (&ss.strides, 0..) |block, i| ss.strides_div[i] = fd.magicNumber(@as(u64, block));
 
             inline for (&ss.strides, 0..) |stride, i| {
                 ss.table[i] = try allocator.alloc(SelectLevelTypes[i], if (num_set == 0) 2 else ((num_set - 1) / stride + 1) + 2);
@@ -330,7 +311,7 @@ pub fn GenericWidow(
                             const remaining = stride - counts[i];
                             std.debug.assert(remaining != 0);
                             const value_pos: u16 = try bit.nthSetBitPos(curr_value, @intCast(remaining));
-                            const table_pos = fastdiv((curr_acc + remaining), ss.strides_div[i]);
+                            const table_pos = fd.fastdiv(ss.strides_div[i], (curr_acc + remaining));
                             if (comptime i == 0) {
                                 if (SelectUsingRank) {
                                     ss.table[i][table_pos] = (curr_pos + value_pos) / RankSelectDivisor;
@@ -338,7 +319,7 @@ pub fn GenericWidow(
                                     ss.table[i][table_pos] = curr_pos + value_pos;
                                 }
                             } else {
-                                const prev_level_pos = fastdiv((curr_acc + remaining), ss.strides_div[i - 1]);
+                                const prev_level_pos = fd.fastdiv(ss.strides_div[i - 1], (curr_acc + remaining));
                                 const treshold = comptime std.math.maxInt(SelectLevelTypes[i]);
                                 if (SelectUsingRank) {
                                     const rel_pos = ((curr_pos + value_pos) / RankSelectDivisor) - ss.table[i - i][prev_level_pos];
@@ -443,9 +424,9 @@ pub fn GenericWidow(
             var bit_pos: BitSize = 0;
             inline for (&st.table, &st.strides_div) |row, precomputed| {
                 if (comptime SelectUsingRank) {
-                    bit_pos += row[fastdiv(i, precomputed)] * RankSelectDivisor;
+                    bit_pos += row[fd.fastdiv(precomputed, i)] * RankSelectDivisor;
                 } else {
-                    bit_pos += row[fastdiv(i, precomputed)];
+                    bit_pos += row[fd.fastdiv(precomputed, i)];
                 }
             }
 
@@ -454,7 +435,7 @@ pub fn GenericWidow(
             if (comptime SelectUsingRank) {
                 remaining = i - rank(rs, bit_array, bit_pos, needle);
             } else {
-                remaining = fastmod(i, st.strides_div[sll - 1], st.strides[sll - 1]);
+                remaining = fd.fastmod(st.strides_div[sll - 1], i, st.strides[sll - 1]);
                 if (i >= st.strides[sll - 1]) remaining += 1;
             }
 

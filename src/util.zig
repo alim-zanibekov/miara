@@ -24,6 +24,12 @@ pub fn randomString(allocator: std.mem.Allocator, len: usize, rng: std.Random) !
     return buffer;
 }
 
+pub fn PowerOf2Int(comptime T: type) type {
+    const info = @typeInfo(T).int;
+    const bits = std.math.ceilPowerOfTwo(u64, info.bits) catch unreachable;
+    return std.meta.Int(info.signedness, bits);
+}
+
 pub const RandomStrings = struct {
     strings: [][]u8,
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
