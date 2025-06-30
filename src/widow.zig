@@ -78,7 +78,9 @@ pub fn GenericWidow(
     return struct {
         const Self = @This();
 
-        const RankLevelTypes = lb: {
+        pub const Type = T;
+
+        pub const RankLevelTypes = lb: {
             var types = [_]type{BitSize} ** RankLevels.len;
             types[0] = PowerOf2Int(std.math.IntFittingRange(0, worst_len - 1));
             for (1..RankLevels.len) |i| {
@@ -87,7 +89,7 @@ pub fn GenericWidow(
             break :lb types;
         };
 
-        const SelectLevelTypes = lb: {
+        pub const SelectLevelTypes = lb: {
             var types = [_]type{BitSize} ** SelectLevels.len;
             types[0] = PowerOf2Int(std.math.IntFittingRange(0, worst_len - 1));
             for (1..SelectLevels.len) |i| {
@@ -96,19 +98,19 @@ pub fn GenericWidow(
             break :lb types;
         };
 
-        const SelectTable = std.meta.Tuple(lb: {
+        pub const SelectTable = std.meta.Tuple(lb: {
             var types = [_]type{BitSize} ** SelectLevels.len;
             for (0..SelectLevels.len) |i| types[i] = []SelectLevelTypes[i];
             break :lb &types;
         });
 
-        const RankTable = std.meta.Tuple(lb: {
+        pub const RankTable = std.meta.Tuple(lb: {
             var types = [_]type{BitSize} ** RankLevels.len;
             for (0..RankLevels.len) |i| types[i] = []RankLevelTypes[i];
             break :lb &types;
         });
 
-        const SelectSupport = struct {
+        pub const SelectSupport = struct {
             strides: [SelectLevels.len]usize,
             strides_div: [SelectLevels.len]u128,
             table: SelectTable,
@@ -122,7 +124,7 @@ pub fn GenericWidow(
             }
         };
 
-        const RankSupport = struct {
+        pub const RankSupport = struct {
             table: RankTable,
             n_set: BitSize,
             size: BitSize,
