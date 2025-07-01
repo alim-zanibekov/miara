@@ -4,6 +4,20 @@ pub const MagicU32 = struct { u64 };
 
 pub const MagicU64 = struct { u128 };
 
+/// Calculate magic number for `fastdiv`, `fastmod`, `is_divisible`
+/// `divisor` - u32 or u64 number
+pub inline fn magicNumber(d: anytype) MagicType(@TypeOf(d)) {
+    const T = MagicType(@TypeOf(d));
+    return switch (T) {
+        MagicU32 => .{magic_u32(d)},
+        MagicU64 => .{magic_u64(d)},
+        else => @compileError("Unsupported magic number type " ++ @typeName(T)),
+    };
+}
+
+/// Fast division, supports u32 and u64
+/// `m` - magic number
+/// `n` - numerator
 pub inline fn fastdiv(m: anytype, n: ReverseMagicType(@TypeOf(m))) ReverseMagicType(@TypeOf(m)) {
     return switch (@TypeOf(m)) {
         MagicU32 => fastdiv_u32(n, m.@"0"),
@@ -12,6 +26,10 @@ pub inline fn fastdiv(m: anytype, n: ReverseMagicType(@TypeOf(m))) ReverseMagicT
     };
 }
 
+/// Fast modulo, supports u32 and u64
+/// `m` - magic number
+/// `n` - numerator
+/// `n` - denominator
 pub inline fn fastmod(m: anytype, n: ReverseMagicType(@TypeOf(m)), d: ReverseMagicType(@TypeOf(m))) ReverseMagicType(@TypeOf(m)) {
     return switch (@TypeOf(m)) {
         MagicU32 => fastmod_u32(n, m.@"0", d),
@@ -20,20 +38,14 @@ pub inline fn fastmod(m: anytype, n: ReverseMagicType(@TypeOf(m)), d: ReverseMag
     };
 }
 
+/// Gives the answer to N mod D == 0
+/// `m` - magic number
+/// `n` - numerator
 pub inline fn is_divisible(m: anytype, n: ReverseMagicType(@TypeOf(m))) bool {
     return switch (@TypeOf(m)) {
         MagicU32 => is_divisible_u32(n, m.@"0"),
         MagicU64 => is_divisible_u64(n, m.@"0"),
         else => @compileError("Unsupported magic type " ++ @typeName(@TypeOf(m))),
-    };
-}
-
-pub inline fn magicNumber(divisor: anytype) MagicType(@TypeOf(divisor)) {
-    const T = MagicType(@TypeOf(divisor));
-    return switch (T) {
-        MagicU32 => .{magic_u32(divisor)},
-        MagicU64 => .{magic_u64(divisor)},
-        else => @compileError("Unsupported magic number type " ++ @typeName(T)),
     };
 }
 
