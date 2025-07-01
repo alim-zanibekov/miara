@@ -242,7 +242,7 @@ pub const NthSetBitError = error{ InvalidN, NotFound };
 
 const testing = std.testing;
 
-/// Returns the index (0-based, from msb) of the n-th set bit in `src`
+/// Returns the index (0-based, from msb) of the n-th (1-based) set bit in `src`
 /// Requires `src` to be an unsigned integer
 pub fn nthSetBitPos(src: anytype, n: std.math.Log2IntCeil(@TypeOf(src))) NthSetBitError!std.math.Log2Int(@TypeOf(src)) {
     const T = @TypeOf(src);
@@ -251,6 +251,10 @@ pub fn nthSetBitPos(src: anytype, n: std.math.Log2IntCeil(@TypeOf(src))) NthSetB
         @compileError("nthSetBitPos requires an unsigned integer, found " ++ @typeName(T));
 
     if (n == 0 or n > info.int.bits) return NthSetBitError.InvalidN;
+
+    if (comptime info.int.bits == 64) {
+        return nthSetBitPosU64Broadword(@bitReverse(src), @intCast(n - 1));
+    }
 
     if (comptime info.int.bits > 8 and std.math.isPowerOfTwo(info.int.bits)) {
         var bits = @bitReverse(src);
@@ -307,6 +311,50 @@ test nthSetBitPos {
     try expectError(NthSetBitError.InvalidN, nthSetBitPos(@as(u8, 0b10110), 0));
     try expectError(NthSetBitError.NotFound, nthSetBitPos(@as(u8, 0b10110), 4));
     try expectError(NthSetBitError.NotFound, nthSetBitPos(@as(u64, 0), 1));
+}
+
+/// Returns the index (0-based, from lsb) of the n-th (0-based) set bit in `src`
+/// Sebastiano Vigna's broadword approach https://vigna.di.unimi.it/ftp/papers/Broadword.pdf
+pub fn nthSetBitPosU64Broadword(x: u64, r: u6) !u6 {
+    const L8: u64 = comptime lX(8);
+
+    var s = x - ((x & 0xAAAAAAAAAAAAAAAA) >> 1);
+    s = (s & 0x3333333333333333) + ((s >> 2) & 0x3333333333333333);
+    s = ((s + (s >> 4)) & 0x0F0F0F0F0F0F0F0F) *% L8;
+    var b = ((leX(8, s, r *% L8) >> 7) *% L8 >> 53) & ~@as(u64, 7);
+    const l = r - ((std.math.shr(u64, (s << 8), b)) & 0xFF);
+    s = (gtX0(8, ((std.math.shr(u64, x, b) & 0xFF) *% L8) & 0x8040201008040201) >> 7) *% L8;
+    b += ((leX(8, s, l *% L8) >> 7) *% L8 >> 56);
+
+    if (b == 72) return NthSetBitError.NotFound;
+    return @intCast(b);
+}
+
+fn leX(comptime k: u6, x: u64, y: u64) u64 {
+    const H = comptime hX(k);
+    return (((y | H) - (x & ~H)) ^ x ^ y) & H;
+}
+
+fn gtX0(comptime k: u6, x: u64) u64 {
+    const H = comptime hX(k);
+    const L = comptime lX(k);
+    return (((x | H) - L) | x) & H;
+}
+
+fn lX(comptime x: u6) u64 {
+    comptime {
+        var acc: u64 = 0;
+        var i = 0;
+        while (i < 64) : (i += x) acc |= 1 << i;
+        return acc;
+    }
+}
+
+fn hX(comptime x: u6) u64 {
+    comptime {
+        std.debug.assert(x > 1);
+        return shl(lX(x), x - 1);
+    }
 }
 
 test "bitArrayAppendAlloc" {
