@@ -148,11 +148,20 @@ pub fn PTHashConfig(Mapper: type, Hasher: type) type {
 
 /// Generic PTHash implementation (minimal perfect hash or compressed)
 pub fn GenericPTHash(
+    /// Seed type for hash function: u64, u32, etc.
     Seed: type,
+    /// Hash type: u64, u32, etc.
     Hash: type,
+    /// Key type for hash function: []const u8, u64, u32, etc.
     Key: type,
+    /// Key to bucket mapper. Must implement IMapper
     Mapper: type,
+    /// Key and pilots hasher. Must implement IHasher
     Hasher: type,
+    /// Custom EliasFano type for encoding pilots, should encode values as prefix sums
+    CustomEliasFanoPS: ?type,
+    /// Custom EliasFano type for encoding displacements, sorted index
+    CustomEliasFano: ?type,
 ) type {
     iface.checkImplementsGuard(IMapper(Hash), Mapper);
     iface.checkImplementsGuard(IHasher(Seed, Key, Hash), Hasher);
@@ -170,6 +179,9 @@ pub fn GenericPTHash(
         i_end: usize, // exclusive
     };
 
+    const EliasFanoPS = CustomEliasFanoPS orelse ef.EliasFanoPS;
+    const EliasFano = CustomEliasFano orelse ef.EliasFano;
+
     return struct {
         const Self = @This();
 
@@ -177,8 +189,8 @@ pub fn GenericPTHash(
         num_keys: usize,
         table_size: usize,
         config: PTHashConfig(Mapper, Hasher),
-        pilots: ef.EliasFanoPS,
-        free_slots: ?ef.EliasFano,
+        pilots: EliasFanoPS,
+        free_slots: ?EliasFano,
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.pilots.deinit(allocator);
@@ -331,10 +343,10 @@ pub fn GenericPTHash(
             }
 
             var iter_pilots = iterator.SliceIterator(u64).init(pilots);
-            var enc_pilots = try ef.EliasFanoPS.init(allocator, 0, @TypeOf(&iter_pilots), &iter_pilots);
+            var enc_pilots = try EliasFanoPS.init(allocator, 0, @TypeOf(&iter_pilots), &iter_pilots);
             errdefer enc_pilots.deinit(allocator);
 
-            var enc_free_slots: ?ef.EliasFano = null;
+            var enc_free_slots: ?EliasFano = null;
             if (config.minimal) {
                 var free_slots = try allocator.alloc(u64, table_size - hashes.len);
                 defer allocator.free(free_slots);
@@ -357,7 +369,7 @@ pub fn GenericPTHash(
 
                 var iter_fs = iterator.SliceIterator(u64).init(free_slots);
                 enc_free_slots = try ef.EliasFano.init(allocator, free_slots[free_slots.len - 1], @TypeOf(&iter_pilots), &iter_fs);
-                errdefer enc_free_slots.deinit(allocator);
+                // errdefer enc_free_slots.deinit(allocator);
             }
 
             return .{
@@ -398,7 +410,7 @@ pub const PTHashParams = struct {
     /// Cache size for hashed pilot values during construction
     hashed_pilot_cache_size: usize = 4096,
     /// Maximum allowed size for any individual bucket
-    max_bucket_size: usize = 255,
+    max_bucket_size: usize = 1024,
 };
 
 /// Wrapper to simplify PTHash instantiation
@@ -411,7 +423,7 @@ pub fn PTHash(
     }
     const Seed = u64;
     const Hasher = if (@typeInfo(Key) == .int) DefaultNumberHasher(Key) else DefaultStringHasher(Key);
-    const T = GenericPTHash(Seed, u64, Key, Mapper, Hasher);
+    const T = GenericPTHash(Seed, u64, Key, Mapper, Hasher, null, null);
 
     return struct {
         pub const Type = T;

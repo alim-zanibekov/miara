@@ -5,19 +5,25 @@ const iterator = @import("iterator.zig");
 const iface = @import("interface.zig");
 const util = @import("util.zig");
 
-pub const EliasFano = GenericEliasFano(u64, false, false);
-pub const EliasFanoPS = GenericEliasFano(u64, false, true);
-pub const EliasFanoGEQ = GenericEliasFano(u64, true, false);
+pub const EliasFano = GenericEliasFano(u64, false, false, null);
+pub const EliasFanoPS = GenericEliasFano(u64, false, true, null);
+pub const EliasFanoGEQ = GenericEliasFano(u64, true, false, null);
 
 /// Elias–Fano representation for monotonically increasing sequences
 /// `T` - an unsigned integer type
 /// `EnableGEQ` - enable get next greater or equal queries
 /// `PrefixSumMode` - encode as prefix sum for arbitrary arrays (though it may overflow)
-pub fn GenericEliasFano(T: type, EnableGEQ: bool, PrefixSumMode: bool) type {
+/// `CustomWidow` - custom Widow type, maybe configured with different params
+pub fn GenericEliasFano(
+    T: type,
+    EnableGEQ: bool,
+    PrefixSumMode: bool,
+    CustomWidow: ?type,
+) type {
     if (@typeInfo(T) != .int or @typeInfo(T).int.signedness != .unsigned)
         @compileError("EliasFano requires an unsigned integer type, found " ++ @typeName(T));
 
-    const Widow = if (EnableGEQ) w.WidowS1S0NR else w.WidowS1NR;
+    const Widow = CustomWidow orelse if (EnableGEQ) w.WidowS1S0NR else w.WidowS1NR;
     const BitArray = bit.GenericBitArray(u64);
 
     return struct {
