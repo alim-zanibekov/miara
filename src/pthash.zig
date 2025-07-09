@@ -476,7 +476,7 @@ pub fn PTHash(
 
 const testing = std.testing;
 
-test "PTHash" {
+test "pthash: 50k random strings" {
     std.debug.print("\n----PTHash----\n\n", .{});
 
     const allocator = std.testing.allocator;
@@ -527,9 +527,26 @@ test "PTHash" {
     var hb = util.HumanBytes{};
 
     std.debug.print(
-        "Bits per key: {d:.4}\nPTHash size:  {s}\nTable size:   {}\nNum keys:     {}\nNum buckets:  {}\n",
+        "Bits per key: {d:.4}\nPTHash size:  {s}\nTable size:   {}\nNum keys:     {}\nNum buckets:  {}\n\n",
         .{
             (toF64(size) * 8.0) / toF64(n), hb.fmt(size), res.table_size, n, res.config.mapper.numBuckets(),
         },
     );
+}
+
+test "pthash: encode single element" {
+    const allocator = std.testing.allocator;
+    const random_number = 37;
+
+    const data: []const u64 = &.{random_number};
+    var iter = iterator.SliceIterator(u64).init(data);
+    const PTHashT = PTHash(u64, OptimalMapper(u64));
+    var res = try PTHashT.build(allocator, @TypeOf(&iter), &iter, PTHashT.buildConfig(iter.size(), .{
+        .lambda = 6,
+        .alpha = 0.97,
+        .minimal = true,
+    }));
+    defer res.deinit(allocator);
+
+    try testing.expectEqual(0, try res.get(random_number));
 }
