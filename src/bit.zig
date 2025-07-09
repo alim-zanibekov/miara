@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// BitArray backed by u64 slice
 pub const BitArray = GenericBitArray(u64);
@@ -252,6 +253,15 @@ pub fn nthSetBitPos(src: anytype, n: std.math.Log2IntCeil(@TypeOf(src))) NthSetB
 
     if (n == 0 or n > info.int.bits) return NthSetBitError.InvalidN;
 
+    if (comptime (info.int.bits == 64 and builtin.cpu.arch == .x86_64 and
+        std.Target.x86.featureSetHas(builtin.cpu.features, .bmi2)) or
+        (info.int.bits == 32 and
+            (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .x86) and
+            std.Target.x86.featureSetHas(builtin.cpu.features, .bmi2)))
+    {
+        return nthSetBitPosBMI2(T, @bitReverse(src), @intCast(n - 1));
+    }
+
     if (comptime info.int.bits == 64) {
         return nthSetBitPosU64Broadword(@bitReverse(src), @intCast(n - 1));
     }
@@ -301,6 +311,7 @@ test nthSetBitPos {
     try expectEqual(6, try nthSetBitPos(@as(u8, 0b00010110), 3));
 
     try expectEqual(0, try nthSetBitPos(@as(u64, 1) << 63, 1));
+    try expectEqual(0, try nthSetBitPos(@as(u32, 1) << 31, 1));
 
     try expectEqual(63, try nthSetBitPos(@as(u64, 1), 1));
 
@@ -355,6 +366,19 @@ fn hX(comptime x: u6) u64 {
         std.debug.assert(x > 1);
         return shl(lX(x), x - 1);
     }
+}
+
+fn nthSetBitPosBMI2(T: type, src: T, n: std.math.Log2Int(T)) NthSetBitError!std.math.Log2Int(T) {
+    if (comptime T != u32 and T != u64) @compileError("Unsupported type");
+    const mask = @as(T, 1) << n;
+    const pdep_result: T = asm volatile ("pdep %[src], %[mask], %[result]"
+        : [result] "=r" (-> T),
+        : [mask] "r" (mask),
+          [src] "r" (src),
+    );
+    if (pdep_result == 0) return NthSetBitError.NotFound;
+    const result = @ctz(pdep_result);
+    return @intCast(result);
 }
 
 test "bitArrayAppendAlloc" {
