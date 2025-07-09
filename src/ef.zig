@@ -228,3 +228,34 @@ test "Elias Fano: prefix sum" {
         try testing.expectEqual(it, ef.get(i));
     }
 }
+
+test "Elias Fano: extreme case 1" {
+    const n = 5000;
+    const data = try testing.allocator.alloc(u64, n);
+    defer testing.allocator.free(data);
+    @memset(data, 0);
+    data[data.len - 1] = ~@as(u64, 0);
+
+    var iter = iterator.SliceIterator(u64).init(data);
+    var ef = try EliasFano.init(testing.allocator, 0, @TypeOf(&iter), &iter);
+    defer ef.deinit(testing.allocator);
+
+    for (data, 0..) |it, i| {
+        try testing.expectEqual(it, ef.get(i));
+    }
+}
+
+test "Elias Fano: extreme case 2" {
+    const n = 1;
+    const data = try testing.allocator.alloc(u64, n);
+    defer testing.allocator.free(data);
+    @memset(data, 0);
+
+    var iter = iterator.SliceIterator(u64).init(data);
+    var ef = try EliasFano.init(testing.allocator, 0, @TypeOf(&iter), &iter);
+    defer ef.deinit(testing.allocator);
+
+    for (data, 0..) |it, i| {
+        try testing.expectEqual(it, ef.get(i));
+    }
+}
