@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Alim Zanibekov
+
 const std = @import("std");
 
 pub usingnamespace @import("ef.zig");

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Alim Zanibekov
+
 const std = @import("std");
 const builtin = @import("builtin");
 const fd = @import("fastd.zig");

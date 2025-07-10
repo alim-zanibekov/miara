@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Alim Zanibekov
+
 const std = @import("std");
 
 /// Returns an error message if `Target` does not implement `Interface`, otherwise null.
