@@ -1,8 +1,8 @@
 # miara
 
 `miara` is a small Zig library that implements several succinct data structures
-along with the SymSpell algorithm. It includes a perfect hash implementation (
-PTHash), a static select/rank structure called Widow (based on SPIDER and
+along with the SymSpell algorithm. It includes a perfect hash implementation
+(PTHash), a static select/rank structure called Widow (based on SPIDER and
 DArray), Elias–Fano integer compression, Serialization/Deserialization lib,
 and a memory-efficient version of the SymSpell - spelling correction algorithm.
 
@@ -451,7 +451,7 @@ by 5 (number of keys), with more input keys this value will be around 2 bits per
 key in the default configuration, this is just an example of how to calculate
 the bits per key
 
-### `miara.symspell.*` SymSpell
+### `miara.symspell.*` SymSpell - spell checker
 
 > [!NOTE]
 > type `T` is one of `u8`,`u16`,`u21`,`u32`
@@ -614,7 +614,7 @@ Segmented: neer gona lt yu dow
 Corrected: never gonna let you down
 ```
 
-`miara.widow.*` Rank/Select queries
+### `miara.widow.*` Rank/Select queries
 
 ```zig
 /// Full-featured. Select and rank support
@@ -778,7 +778,7 @@ select1(4):  12   # index of the 4-th one
 select0(10): 16   # index of the 10-th zero
 ```
 
-`miara.*` EliasFano
+### `miara.*` EliasFano - integer compression
 
 ```zig
 pub const EliasFano = GenericEliasFano(u64, false, false, null);
@@ -857,7 +857,7 @@ get(3):           991
 getNextGEQ(5000): 9999
 ```
 
-`miara.*` BitArray
+### `miara.*` BitArray
 
 ```zig
 /// BitArray backed by u64 slice
@@ -973,7 +973,7 @@ Output
 0000110000111
 ```
 
-`miara.filter.*`
+### `miara.filter.*` Bloom filter
 
 ```zig
 /// Estimates bit size needed for Bloom filter with `n_keys` and false positive rate
@@ -1096,7 +1096,7 @@ and     true
 never   false
 ```
 
-`miara.fastd.*`
+### `miara.fastd.*` Fast division/modulus
 
 ```zig
 
@@ -1149,7 +1149,7 @@ Output
 42 / 37:    1
 ```
 
-`miara.serde.*`
+### `miara.serde.*` Serialization/Deserialization
 
 ```zig
 /// Serialize value using native endianness. Convenience wrapper for serializeEndian
